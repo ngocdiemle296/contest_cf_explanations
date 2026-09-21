@@ -54,8 +54,4 @@ python contest/script.py --dataset bpi12
 
 ## License
 This project is licensed under the MIT License.
-python 
-```
 
-## License
-This project is licensed under the MIT License.
