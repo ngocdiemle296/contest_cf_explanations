@@ -49,7 +49,17 @@ The five event logs used in the paper (BPIC2012, BPIC2017 Before, BPIC2017 After
 
 ### 5. Run CONTEST (our framework)
 ```bash
-python contest/script.py --dataset bpi12
+python -m contest.script \
+    --dataset-name “bpi12” \
+    --train-csv contest/case_studies/bpi12/train_data.csv \
+    --test-csv contest/case_studies/bpi12/test_data.csv
+
+### 6. Run baseline (REVISED+_pres)
+```bash
+python -m baseline.revised_plus.script \
+    --dataset-name "bpi12" \
+    --train-csv baseline/revised_plus/case_studies/bpi12/train_data.csv \
+    --test-csv baseline/revised_plus/case_studies/bpi12/test_data.csv
 ```
 
 ## License
