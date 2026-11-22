@@ -1,10 +1,4 @@
-"""
-CSV loader that turns an XES-derived event log export into the Event objects and domain registry defined in event_log.py.
-This loader is dataset-agnostic. It only requires three standard columns: case:concept:name, concept:name, and time:timestamp. 
-All other columns are discovered automatically as either categorical or scalar features, and are attached to each Event's attributes dictionary.
-"""
-
-from typing import List, Optional
+from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
 from contest.data import event_log
@@ -15,83 +9,13 @@ def _parse_timestamps(series: pd.Series) -> pd.Series:
         parsed = pd.to_datetime(series, utc=True, errors="coerce", format="mixed")
     except TypeError:
         parsed = pd.to_datetime(series, utc=True, errors="coerce")
-
-    if parsed.isna().all() and series.notna().any():
-        parsed = pd.to_datetime(series, utc=True, errors="coerce")
-
     if parsed.isna().any():
         bad_count = int(parsed.isna().sum())
         raise ValueError(f"Failed to parse {bad_count} timestamp rows in CSV.")
     return parsed
 
 
-def _infer_case_id_like_columns(
-    df: pd.DataFrame,
-    candidate_cols: List[str],
-    case_col: str = "case:concept:name",
-    uniqueness_threshold: float = 0.95,
-) -> List[str]:
-    """
-    Behaviorally detect columns (numeric or string) that are alternate
-    case identifiers rather than genuine case-level features.
-
-    Two conditions, both required:
-      1. Constant within every case (doesn't vary event-to-event) —
-         necessary but not sufficient, since real case-level attributes
-         (e.g. AMOUNT_REQ) are also constant-per-case.
-      2. Near-bijective with the case ID: distinct values in the column
-         are close to the number of distinct cases
-         (distinct_vals / n_cases >= uniqueness_threshold). A genuine
-         attribute isn't structurally tied to case count; an ID column is
-         (one ID per case, by definition).
-    """
-    n_cases = df[case_col].nunique()
-    if n_cases == 0:
-        return []
-
-    id_like = []
-    for col in candidate_cols:
-        if col == case_col:
-            continue
-        per_case_nunique = df.groupby(case_col)[col].nunique(dropna=True)
-        if not (per_case_nunique <= 1).all():
-            continue  # varies within a case -> genuine event-level feature
-
-        distinct_vals = df[col].nunique(dropna=True)
-        if distinct_vals / n_cases >= uniqueness_threshold:
-            id_like.append(col)
-
-    return id_like
-
-
-def _infer_timestamp_like_string_columns(
-    df: pd.DataFrame,
-    candidate_cols: List[str],
-    parse_success_threshold: float = 0.95,
-) -> List[str]:
-    """
-    Behaviorally detect string/object columns that hold timestamps
-    rather than categorical values, without hardcoding a column name.
-
-    A column qualifies if at least `parse_success_threshold` of its
-    non-null values parse as datetimes via pandas. 
-    """
-    timestamp_like = []
-    for col in candidate_cols:
-        s = df[col].dropna()
-        if s.empty:
-            continue
-        parsed = pd.to_datetime(s, utc=True, errors="coerce", format="mixed")
-        success_rate = parsed.notna().mean()
-        if success_rate >= parse_success_threshold:
-            timestamp_like.append(col)
-    return timestamp_like
-
-
 def prepare_event_log_csv(input_path: str, output_path: str) -> None:
-    """
-    Precompute per-event remaining_time and write an enriched copy of the CSV.
-    """
     df = pd.read_csv(input_path)
     if "time:timestamp" not in df.columns:
         raise ValueError("Missing time:timestamp column in CSV.")
@@ -103,7 +27,18 @@ def prepare_event_log_csv(input_path: str, output_path: str) -> None:
     remaining_hours = (end_times - df["time:timestamp"]).dt.total_seconds() / 3600.0
     df["remaining_time"] = remaining_hours.astype(float)
 
+    if "reward" in df.columns:
+        df = df.drop(columns=["reward"])
+
     df.to_csv(output_path, index=False)
+
+
+def prepare_bpic2012_csv(input_path: str, output_path: str) -> None:
+    prepare_event_log_csv(input_path, output_path)
+
+
+def prepare_bpic2017_csv(input_path: str, output_path: str) -> None:
+    prepare_event_log_csv(input_path, output_path)
 
 
 def load_event_log_csv(
@@ -111,45 +46,8 @@ def load_event_log_csv(
     compute_remaining_time: bool = True,
     sample_n_cases: Optional[int] = None,
     seed: int = 0,
-    dataset_label: Optional[str] = None,
-    force_keep_numeric: Optional[List[str]] = None,
-    force_keep_string: Optional[List[str]] = None,
-    id_uniqueness_threshold: float = 0.95,
-    timestamp_parse_threshold: float = 0.95,
+    dataset_label: str = "event_log",
 ) -> List[event_log.Case]:
-    """
-    Load a CSV event log into DIFF-ERO's in-memory Case/Event representation.
-
-    This is the function the rest of the pipeline actually calls. It:
-      1. Parses timestamps and sorts events per case.
-      2. Optionally subsamples to `sample_n_cases` cases (reproducible via `seed`).
-      3. Computes remaining_time on the fly if `compute_remaining_time=True`
-         (independent of whether prepare_event_log_csv was ever run).
-      4. Auto-discovers categorical vocabularies and scalar (min, max)
-         bounds from every non-reserved, non-structural, non-ID-like,
-         non-timestamp-like column.
-      5. Builds one Event per row (attributes dict) and groups into Case
-         objects per case:concept:name.
-      6. Registers the discovered activities/resources/vocabularies/bounds
-         as global domain state via event_log.set_domain(...) and
-         event_log.NUMERIC_MIN_MAX - required before encoder training or
-         CF search can run.
-
-    Args:
-        force_keep_numeric: numeric column names to always treat as real
-            scalar features even if flagged as case-ID-like (escape hatch
-            for _infer_case_id_like_columns false positives).
-        force_keep_string: string column names to always treat as real
-            categorical features even if flagged as case-ID-like or
-            timestamp-like (escape hatch for the same reason).
-        id_uniqueness_threshold: passed through to _infer_case_id_like_columns.
-        timestamp_parse_threshold: passed through to
-            _infer_timestamp_like_string_columns.
-
-    Note: if compute_remaining_time=False and the CSV has no
-    remaining_time column of its own, remaining_time will be NaN for
-    every event - this is silent, so check upstream if you rely on it.
-    """
     df = pd.read_csv(path)
     if "time:timestamp" not in df.columns:
         raise ValueError("Missing time:timestamp column in CSV.")
@@ -186,49 +84,12 @@ def load_event_log_csv(
 
     resources = sorted(df.apply(_resource_label, axis=1).unique().tolist())
 
-    force_keep_numeric = set(force_keep_numeric or [])
-    force_keep_string = set(force_keep_string or [])
-
-    # --- structural exclusions: actively consumed elsewhere in this loader ---
-    STRUCTURAL_NUMERIC_EXCLUSIONS = ["remaining_time", "time:timestamp", "case:concept:name"]
-    STRUCTURAL_STRING_EXCLUSIONS = ["case:concept:name", "concept:name", "org:resource", "actor"]
-
-    # --- numeric side: behaviorally detected case-ID-like columns ---
     all_numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
-    numeric_candidates = [c for c in all_numeric_cols if c not in STRUCTURAL_NUMERIC_EXCLUSIONS]
-    id_like_numeric = [
-        c for c in _infer_case_id_like_columns(df, numeric_candidates, uniqueness_threshold=id_uniqueness_threshold)
-        if c not in force_keep_numeric
-    ]
-    if id_like_numeric:
-        print(f"  Auto-excluded case-ID-like numeric columns: {id_like_numeric} "
-              f"(pass force_keep_numeric=[...] to override)")
-
-    ignored_numeric = STRUCTURAL_NUMERIC_EXCLUSIONS + id_like_numeric
+    ignored_numeric = ["remaining_time", "time:timestamp", "case:concept:name", "case:landRegisterID", "case:IDofConceptCase"]
     scalar_cols = [c for c in all_numeric_cols if c not in ignored_numeric]
 
-    # --- string side: behaviorally detected timestamp-like and ID-like columns ---
     all_string_cols = df.select_dtypes(include=["object", "category", "string", "bool"]).columns.tolist()
-    string_candidates = [c for c in all_string_cols if c not in STRUCTURAL_STRING_EXCLUSIONS]
-
-    timestamp_like_strings = [
-        c for c in _infer_timestamp_like_string_columns(df, string_candidates, parse_success_threshold=timestamp_parse_threshold)
-        if c not in force_keep_string
-    ]
-    if timestamp_like_strings:
-        print(f"  Auto-excluded timestamp-like string columns: {timestamp_like_strings} "
-              f"(pass force_keep_string=[...] to override)")
-
-    remaining_string_candidates = [c for c in string_candidates if c not in timestamp_like_strings]
-    id_like_strings = [
-        c for c in _infer_case_id_like_columns(df, remaining_string_candidates, uniqueness_threshold=id_uniqueness_threshold)
-        if c not in force_keep_string
-    ]
-    if id_like_strings:
-        print(f"  Auto-excluded case-ID-like string columns: {id_like_strings} "
-              f"(pass force_keep_string=[...] to override)")
-
-    ignored_strings = STRUCTURAL_STRING_EXCLUSIONS + timestamp_like_strings + id_like_strings
+    ignored_strings = ["case:concept:name", "concept:name", "org:resource", "actor", "start:timestamp"]
     cat_cols = [c for c in all_string_cols if c not in ignored_strings]
 
     RESERVED = {"activity", "resource", "concept:name"}
@@ -281,3 +142,27 @@ def load_event_log_csv(
           f"{len(min_max_bounds)} scalar cols")
 
     return cases
+
+
+def load_bpic2012_csv(
+    path: str,
+    compute_remaining_time: bool = True,
+    sample_n_cases: Optional[int] = None,
+    seed: int = 0,
+) -> List[event_log.Case]:
+    return load_event_log_csv(
+        path, compute_remaining_time=compute_remaining_time,
+        sample_n_cases=sample_n_cases, seed=seed, dataset_label="bpic2012",
+    )
+
+
+def load_bpic2017_csv(
+    path: str,
+    compute_remaining_time: bool = True,
+    sample_n_cases: Optional[int] = None,
+    seed: int = 0,
+) -> List[event_log.Case]:
+    return load_event_log_csv(
+        path, compute_remaining_time=compute_remaining_time,
+        sample_n_cases=sample_n_cases, seed=seed, dataset_label="bpic2017_after",
+    )

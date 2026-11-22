@@ -1,0 +1,57 @@
+template,a,b
+chain_precedence,O_Create Offer,O_Created
+chain_response,O_Create Offer,O_Created
+chain_succession,O_Create Offer,O_Created
+co_existence,A_Accepted,A_Concept
+co_existence,A_Accepted,A_Create Application
+co_existence,A_Accepted,O_Create Offer
+co_existence,A_Accepted,O_Created
+co_existence,A_Concept,A_Create Application
+co_existence,A_Concept,O_Create Offer
+co_existence,A_Concept,O_Created
+co_existence,A_Create Application,O_Create Offer
+co_existence,A_Create Application,O_Created
+co_existence,O_Create Offer,O_Created
+exactly,A_Accepted,
+exactly,A_Concept,
+exactly,A_Create Application,
+init,A_Create Application,
+not_succession,A_Accepted,A_Concept
+not_succession,A_Accepted,A_Create Application
+not_succession,A_Concept,A_Create Application
+not_succession,O_Create Offer,A_Accepted
+not_succession,O_Create Offer,A_Concept
+not_succession,O_Create Offer,A_Create Application
+not_succession,O_Created,A_Accepted
+not_succession,O_Created,A_Concept
+not_succession,O_Created,A_Create Application
+precedence,A_Accepted,O_Create Offer
+precedence,A_Accepted,O_Created
+precedence,A_Concept,A_Accepted
+precedence,A_Concept,O_Create Offer
+precedence,A_Concept,O_Created
+precedence,A_Create Application,A_Accepted
+precedence,A_Create Application,A_Concept
+precedence,A_Create Application,O_Create Offer
+precedence,A_Create Application,O_Created
+precedence,O_Create Offer,O_Created
+response,A_Accepted,O_Create Offer
+response,A_Accepted,O_Created
+response,A_Concept,A_Accepted
+response,A_Concept,O_Create Offer
+response,A_Concept,O_Created
+response,A_Create Application,A_Accepted
+response,A_Create Application,A_Concept
+response,A_Create Application,O_Create Offer
+response,A_Create Application,O_Created
+response,O_Create Offer,O_Created
+succession,A_Accepted,O_Create Offer
+succession,A_Accepted,O_Created
+succession,A_Concept,A_Accepted
+succession,A_Concept,O_Create Offer
+succession,A_Concept,O_Created
+succession,A_Create Application,A_Accepted
+succession,A_Create Application,A_Concept
+succession,A_Create Application,O_Create Offer
+succession,A_Create Application,O_Created
+succession,O_Create Offer,O_Created

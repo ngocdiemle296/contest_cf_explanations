@@ -1,7 +1,3 @@
-"""
-Main script for running the REVISED+_pres baseline
-"""
-
 import argparse
 import json
 import logging
@@ -16,25 +12,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import torch
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", force=True)
+logging.basicConfig(level=logging.ERROR, format="%(asctime)s | %(levelname)s | %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
 from baseline.revised_plus.data.event_log_csv import load_event_log_csv
 from baseline.revised_plus.data import event_log as el
-from baseline.revised_plus.pipeline import Pipeline
+from baseline.revised_plus.pipeline import LatentMDP
 from baseline.revised_plus.data import domain_persistence
 
 
-# Milestone slice-index computation
-
 def milestone_slice_idx(n: int, milestone: float) -> int:
-    """
-    slice_idx = max(1, min(round(n * milestone), n - 1))
-
-    n         : full trace length (number of events) for this case
-    milestone : fraction in (0, 1), e.g. 0.2 for 20%, 0.5 for 50%
-
-    """
     if n < 2:
         raise ValueError(
             f"Cannot compute a milestone slice for a trace with only {n} event(s) "
@@ -43,16 +30,8 @@ def milestone_slice_idx(n: int, milestone: float) -> int:
     raw = round(n * milestone)
     return max(1, min(raw, n - 1))
 
-def compute_length_buckets(case_lengths, n_buckets: int = 4, method: str = "quantile"):
-    """
-    case_lengths : array-like of trace lengths (n_events) for all test cases.
-    method       : "quantile" (equal-count buckets, comparable per-bucket
-                   statistical power) or "log" (log-spaced edges — better if
-                   a long tail of very long cases would otherwise dominate
-                   the top quantile bucket).
 
-    Returns (edges, labels). edges has len(labels) + 1 entries. 
-    """
+def compute_length_buckets(case_lengths, n_buckets: int = 4, method: str = "quantile"):
     case_lengths = np.asarray(case_lengths)
 
     if method == "quantile":
@@ -98,6 +77,7 @@ def load_bucket_edges(path: str):
         payload["n_buckets"],
     )
 
+
 def assign_length_bucket(n_events: int, edges: np.ndarray, labels: list) -> str:
     idx = np.searchsorted(edges, n_events, side="right") - 1
     idx = min(max(idx, 0), len(labels) - 1)
@@ -105,10 +85,6 @@ def assign_length_bucket(n_events: int, edges: np.ndarray, labels: list) -> str:
 
 
 def compute_milestone_slices(n: int, milestones, min_case_length: int = 5):
-    """
-    Returns a list of (milestone, slice_idx) pairs for one case.
-    Cases with n < min_case_length return an empty list.
-    """
     if n < min_case_length:
         return []
 
@@ -123,141 +99,62 @@ def compute_milestone_slices(n: int, milestones, min_case_length: int = 5):
     return out
 
 
-def plausibility_score(z_cf: torch.Tensor) -> Tuple[float, float]: # Manifold Feasibility 
+def plausibility_score(z_cf: torch.Tensor) -> Tuple[float, float]:
     with torch.no_grad():
         l_man = 0.5 * (z_cf ** 2).sum(dim=-1).mean().item()
     return l_man, -l_man
 
 
-# CLI
-
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run the CF explanation experiment over a user-provided "
-                    "test set at a fixed per-case milestone cut point.",
+        description='REVISED+ baseline: counterfactual explanations of activity-resource recommendations for the cases of a test log.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # Data
-    p.add_argument("--dataset-name", type=str, default=None,
-                       help="Name of the dataset, used for labeling and reporting purposes.")
-    p.add_argument("--train-csv", required=True, help="Path to the training-set CSV.")
-    p.add_argument("--test-csv", required=True, help="Path to the test-set CSV.")
+    p.add_argument("--train-csv", required=True, help='Training log (CSV) the models were trained on.')
+    p.add_argument("--test-csv", required=True, help='Test log (CSV) whose running cases are explained.')
 
-    # Milestone 
     p.add_argument("--milestones", type=float, nargs="+", default=[0.2, 0.4, 0.6, 0.8],
-                   help="Cut-point fractions in (0, 1), e.g. 0.2 0.4 0.6 0.8. "
-                        "NOT percentage integers — pass 0.2, not 20. Applied WITHIN "
-                        "each length bucket (see --n-buckets), not globally, so a "
-                        "given milestone corresponds to a comparable absolute prefix "
-                        "length across the cases it's applied to.")
+                   help='Cut points as fractions of the case length, e.g. 0.2 0.4 0.6 0.8.')
     p.add_argument("--n-buckets", type=int, default=2,
-                   help="Number of case-length buckets to stratify the test set into "
-                        "before applying milestones. Bucket edges are derived from "
-                        "the test set's own empirical length distribution.")
+                   help='Number of case-length buckets (ignored when --bucket-edges-file exists).')
     p.add_argument("--bucket-method", type=str, default="quantile",
                    choices=["quantile", "log"],
-                   help="'quantile' = equal-count buckets (comparable statistical "
-                        "power per bucket). 'log' = log-spaced edges (better when a "
-                        "long tail of very long cases would otherwise dominate the "
-                        "top quantile bucket).")
+                   help='How bucket edges are computed when no edges file exists.')
     p.add_argument("--min-case-length", type=int, default=5,
-                   help="Cases with fewer events than this are excluded from "
-                        "milestone-based sampling (too short to meaningfully "
-                        "differentiate milestones — see rounding-collapse note in "
-                        "compute_milestone_slices) and instead get a single "
-                        "fixed-prefix explanation, reported separately as bucket "
-                        "'excluded_short'.")
+                   help='Cases shorter than this get a single pass at prefix length n-1.')
     p.add_argument("--dry-run", action="store_true",
-                   help="Print the pre-flight (length_bucket, milestone) case-count "
-                        "cross-tab and exit BEFORE running any explain() calls. Use "
-                        "this to check --n-buckets/--milestones/--min-case-length are "
-                        "well-calibrated for your test set's size before committing "
-                        "to the full (expensive) run.")
+                   help='Print the number of units per (bucket, milestone) and exit.')
     p.add_argument("--contrast-mode", type=str, default="joint",
                    choices=["activity", "resource", "joint", "any"],
-                   help="Which joint-action targets explain() is allowed to "
-                        "search for. See LatentMDP.explain()'s docstring.")
+                   help='Which component of the recommended pair must change: activity, resource, joint (both) or any.')
+    p.add_argument("--require-target-match", action="store_true",
+                   help='Accept a CF only if the black box recommends exactly the surrogate target pair.')
     p.add_argument("--cf-k", type=int, default=5,
-                   help="Max number of distinct CFs to generate/save per test case.")
+                   help='Maximum number of counterfactuals per unit.')
     p.add_argument("--limit-cases", type=int, default=None,
-                   help="Only process N test cases (after loading, before "
-                        "bucketing/milestone slicing). Use this to validate "
-                        "a code change (e.g. the contrast-aware decoder fix) "
-                        "on a small, fast subset before committing to a "
-                        "full re-run — e.g. --limit-cases 20.")
+                   help='Only process the first N test cases (after --case-ids and --case-offset).')
+    p.add_argument("--verbose", action="store_true", help='Show the log messages of the search (warnings and discarded candidates).')
+    p.add_argument("--case-ids", type=str, nargs="+", default=None,
+                   help='Only process the test cases with these case IDs.')
     p.add_argument("--case-offset", type=int, default=0,
-                   help="Skip the first N cases before applying --limit-cases. "
-                        "NOTE: this relies on test_cases ordering being "
-                        "identical across separate script invocations "
-                        "(same --test-csv, same pandas groupby behavior) — "
-                        "if you're not confident that holds, use "
-                        "--skip-processed-dir instead, which is robust to "
-                        "ordering entirely.")
+                   help='Skip the first N test cases.')
     p.add_argument("--bucket-edges-file", type=str, default=None,
-                   help="Path to a JSON file of length-bucket edges (as "
-                        "written by this script). If the file exists, edges "
-                        "are LOADED from it (and --n-buckets/--bucket-method "
-                        "are ignored — the file's own values are used, with "
-                        "a warning if you passed different ones), so every "
-                        "batch invocation buckets against the SAME fixed "
-                        "edges. If the file does NOT exist, edges are "
-                        "computed from the FULL --test-csv (before "
-                        "--case-offset/--limit-cases are applied) and saved "
-                        "here for subsequent batches to reuse. Required for "
-                        "coherent bucket labels when processing a test set "
-                        "in multiple separate batched runs; default "
-                        "location is {weights-dir}/bucket_edges.json if not "
-                        "given explicitly.")
+                   help='JSON file with the length-bucket edges. Default: <weights-dir>/bucket_edges.json.')
     p.add_argument("--skip-processed-dir", type=str, default=None, nargs="+",
-                   help="Path(s) to one or more explanations/ directories from PRIOR run(s) "
-                        "(e.g. --output-dir's explanations/ subfolder). Any "
-                        "case whose case_id already has at least one JSON "
-                        "file in this directory is skipped — matched by the "
-                        "actual case_id recorded inside each JSON, not by "
-                        "position/order. Use this instead of --case-offset "
-                        "whenever you're not 100% sure test_cases will be "
-                        "ordered identically across runs (e.g. different "
-                        "--test-csv path, re-exported CSV, different "
-                        "pandas/environment) — this guarantees no overlap "
-                        "regardless of ordering. Can be combined with "
-                        "--limit-cases to process the next N NOT-yet-done "
-                        "cases.")
+                   help='Skip cases that already have a JSON file in these explanations/ folders.')
 
-    # Model weights: load existing, or train fresh from --train-csv
-    p.add_argument("--weights-dir", type=str, default="demo/weights_milestone",
-                   help="Directory to load trained weights from (if present) or save "
-                        "newly-trained weights to.")
+    p.add_argument("--weights-dir", type=str, required=True,
+                   help='Folder with the trained black box, VAE and domain snapshot.')
     p.add_argument("--retrain", action="store_true",
-                   help="Force retraining from --train-csv even if --weights-dir "
-                        "already contains a complete set of weights.")
+                   help='Train the models from --train-csv and save them to --weights-dir.')
     p.add_argument("--reuse-black-box-from", type=str, default=None,
-                   help="Path to a weights directory containing an existing "
-                        "black_box.cbm to REUSE (not retrain) during --retrain. "
-                        "Without this, --retrain silently retrains the black-box "
-                        "too, which breaks cross-run comparability -- the "
-                        "black-box is meant to be a fixed query oracle (Section "
-                        "2) shared identically across every arm/run. Use this "
-                        "whenever the retrain's purpose is isolating a VAE-side "
-                        "change (lambda_res, gamma_conf, TDC, ...) rather than "
-                        "intentionally training a new black-box.")
+                   help='With --retrain, reuse the black_box.cbm found in this folder.')
 
-    # Output
     p.add_argument("--output-dir", type=str, default=None,
-                   help="Where to save results. Defaults to "
-                        "{weights-dir}/milestone_sweep_{contrast-mode}.")
+                   help='Output folder. Default: <weights-dir>/milestone_sweep_<contrast-mode>.')
     p.add_argument("--debug-attempts-dir", type=str, default=None,
-                   help="If set, explain() writes one JSON per (case, step) "
-                        "to this directory with a record for EVERY candidate "
-                        "target attempted — not just accepted CFs — "
-                        "including target pair feasibility, predicted-time "
-                        "margin vs. cf_delta, and rejection reason "
-                        "(faithfulness_check_failed / not_flipped / "
-                        "duplicate / accepted_stage1). Use this to diagnose "
-                        "why n_attempts is high but n_found is low for a "
-                        "given contrast type — e.g. "
-                        "--debug-attempts-dir {output-dir}/debug_attempts.")
+                   help='If set, write one JSON per unit with every candidate target that was tried.')
 
-    # CF search hyperparameters 
     p.add_argument("--cf-max-iter", type=int, default=500)
     p.add_argument("--cf-lr", type=float, default=0.1)
     p.add_argument("--cf-lambda1", type=float, default=5.0)
@@ -266,84 +163,44 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cf-delta", type=float, default=0.02)
     p.add_argument("--surrogate-epochs", type=int, default=500)
     p.add_argument("--editable-history-steps", type=int, default=5,
-                    help="Number of historical steps (immediately before the "
-                         "current recommended step) to additionally free for "
-                         "the CF search, on top of the always-editable last "
-                         "step. 0 (default) reproduces the original "
-                         "single-step-only behavior. E.g. 3 at step=16 frees "
-                         "steps 13,14,15,16. Multi-step CFs are tagged "
-                         "history_edit_multi_step=True / editable_steps_used "
-                         "in the output — keep these in a separate results "
-                         "slice from single-step CFs, same as expulsion-regime "
-                         "CFs.")
-    
-    # KPI-delta significance
+                    help='Number of events before the current one that the search may also change.')
+
     p.add_argument("--kpi-significance-threshold", type=float, default=0.05,
-                    help="Minimum |percent change| in the black box's "
-                         "predicted KPI (predict_time_for_pair, relative to "
-                         "the ORIGINAL recommendation) for a CF to be tagged "
-                         "kpi_significant=True. Candidates are never "
-                         "discarded for failing this — only tagged/re-ranked.")
+                    help='Minimum relative KPI change for a CF to be tagged kpi_significant.')
     p.add_argument("--kpi-min-baseline", type=float, default=1e-3,
-                    help="If the original prediction's magnitude falls below "
-                         "this, percent change is numerically unstable, so "
-                         "the significance check falls back to an absolute-"
-                         "KPI-unit delta instead.")
-    
-    # Training hyperparameters — only used if a fresh train is triggered
+                    help='Below this KPI magnitude the absolute change is used instead of the relative one.')
+
     p.add_argument("--latent-dim", type=int, default=64)
     p.add_argument("--hidden-dim", type=int, default=124)
     p.add_argument("--beta-vae", type=float, default=0.01)
     p.add_argument("--gamma", type=float, default=0.95)
-    p.add_argument("--epochs-vae", type=int, default=100) 
+    p.add_argument("--epochs-vae", type=int, default=100)
     p.add_argument("--epochs-transition", type=int, default=50)
     p.add_argument("--epochs-reward", type=int, default=30)
-    p.add_argument("--batch-size", type=int, default=512) #from 32
+    p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--surrogate-n", type=int, default=2000) 
-    p.add_argument("--surrogate-rho", type=float, default=0.15)
+    p.add_argument("--surrogate-n", type=int, default=2000)
+    p.add_argument("--surrogate-rho", type=float, default=0.5)
     p.add_argument("--use-conformance", action="store_true", default=True)
     p.add_argument("--gamma-conf", type=float, default=0.0)
     p.add_argument("--declare-lambda-tdc", type=float, default=0.1,
-                    help="REVISED+ baseline arm (Phase 1): weight for the Trace Declare "
-                         "Constraint loss, mined label-agnostically over the full TRAIN log. "
-                         "0.0 (default) = no-op, your own method's normal training is unaffected. "
-                         "Set >0 with --gamma-conf 0.0 for a TDC-only ablation, or leave "
-                         "--gamma-conf at its default for the combined DIFF-ERO+TDC arm.")
-    p.add_argument("--lambda-res", type=float, default=0.1,
-                    help="Weight for the resource-activity feasibility training loss")
+                    help='Weight of the trace-level Declare constraint (TDC) loss during VAE training.')
+    p.add_argument("--lambda-res", type=float, default=0.0,
+                    help='Weight of the resource-activity feasibility loss during VAE training.')
     p.add_argument("--cf-lambda-ldc", type=float, default=1.0,
-                    help="REVISED+ baseline arm (Phase 2): weight for the per-target "
-                         "Label-specific Declare Constraint loss during CF search. "
-                         "0.0 (default) = no-op.")
+                    help='Weight of the label-specific Declare constraint (LDC) loss during the CF search.')
     p.add_argument("--cf-enforce-ldc", action="store_true",
-                    help="REVISED+ fidelity mode: hard-reject CF candidates with L_LDC > 0 "
-                         "(matches Algorithm 1's 'F(sigma_CF) > p and L_LDC = 0' acceptance "
-                         "rule) rather than only soft-penalizing via --cf-lambda-ldc's loss "
-                         "term. Meaningless unless --cf-lambda-ldc > 0.")
+                    help='Reject candidates that violate any LDC (hard gate). Off in the reported experiments.')
     p.add_argument("--device", type=str, default="cpu")
 
-    # Black-box CV hyperparameters — only used if a fresh train is triggered
     p.add_argument("--skip-bb-cv", action="store_true",
-                    help="Skip the black-box k-fold CV before the final fit "
-                         "(only used if a fresh train is triggered). If set "
-                         "and --bb-cv-summary-path is NOT given, CV runs "
-                         "anyway with a warning — see train_black_box().")
+                    help='With --retrain, skip the black-box cross-validation.')
     p.add_argument("--bb-cv-k", type=int, default=5,
-                    help="Number of folds for black-box CV (ignored if "
-                         "--skip-bb-cv is set together with "
-                         "--bb-cv-summary-path).")
+                    help='Number of folds for the black-box cross-validation.')
     p.add_argument("--bb-cv-summary-path", type=str, default=None,
-                    help="Path to a JSON file (matching cross_validate_"
-                         "black_box()'s output schema: rmse_mean, rmse_std, "
-                         "mae_mean, mae_std, neg_rate_mean, neg_rate_std, k) "
-                         "to attach as model.cv_summary instead of "
-                         "recomputing it. Only takes effect together with "
-                         "--skip-bb-cv. Only valid if train_data.csv and "
-                         "the black-box hyperparameters haven't changed "
-                         "since that summary was computed.")
+                    help='With --skip-bb-cv, attach this precomputed CV summary to the black box.')
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     bad = [m for m in args.milestones if not (0.0 < m < 1.0)]
     if bad:
@@ -372,17 +229,17 @@ def section(title: str) -> None:
     print(f"{'─' * 55}")
 
 
-# Main
-
-def main() -> None:
-    args = parse_args()
+def main(argv=None) -> None:
+    args = parse_args(argv)
+    if args.verbose:
+        logging.getLogger().setLevel(logging.INFO)
 
     out_dir = args.output_dir or os.path.join(
-        args.weights_dir, f"milestone_{args.contrast_mode}"
+        args.weights_dir, f"milestone_sweep_{args.contrast_mode}"
     )
     os.makedirs(out_dir, exist_ok=True)
 
-    banner("Length-Bucket x Milestone CF Explanation Experiment")
+    banner("Latent MDP — Length-Bucket x Milestone CF Explanation Experiment")
     print(f"  Train CSV        : {args.train_csv}")
     print(f"  Test CSV         : {args.test_csv}")
     print(f"  Milestones       : {args.milestones}")
@@ -400,7 +257,6 @@ def main() -> None:
     print(f"  Weights dir      : {args.weights_dir}")
     print(f"  Output dir       : {out_dir}")
 
-    # ── 1. Data — train and test are two separate ──────
     section("1 / Data loading")
 
     if not os.path.exists(args.train_csv):
@@ -408,22 +264,21 @@ def main() -> None:
     if not os.path.exists(args.test_csv):
         raise FileNotFoundError(f"Test CSV not found: {args.test_csv}")
 
-    train_cases = load_event_log_csv(args.train_csv, sample_n_cases=None, dataset_label=args.dataset_name)
+    train_cases = load_event_log_csv(args.train_csv, sample_n_cases=None)
     print(f"  Loaded train CSV: {args.train_csv}  ({len(train_cases)} cases)")
 
-    # Build domain artifacts from TRAIN cases only 
     el.build_resource_activity_matrix(train_cases, min_observations=1)
     el.discover_case_invariant_features(train_cases)
-    el.discover_activity_determined_categoricals(train_cases)   
-    el.build_activity_to_category_maps(train_cases)      
+    el.discover_activity_determined_categoricals(train_cases)
+    el.build_activity_to_category_maps(train_cases)
     print(f"  Resource-activity matrix: {el.RESOURCE_ACTIVITY_MATRIX.shape}, "
           f"feasible pairs: {int(el.RESOURCE_ACTIVITY_MATRIX.sum())}")
     print(f"  Case-invariant features : {el.CASE_INVARIANT_FEATURES}")
 
-    # ── 2. Phase 1 — load existing weights, or train fresh ─────────────────
     section("2 / Phase 1 — load or train")
 
-    lmdp = Pipeline(
+
+    lmdp = LatentMDP(
         latent_dim=args.latent_dim,
         hidden_dim=args.hidden_dim,
         beta_vae=args.beta_vae,
@@ -442,15 +297,21 @@ def main() -> None:
     )
 
     weights_dir = os.path.abspath(args.weights_dir)
-    required_files = ["black_box.cbm", "transition_system.json", "vae.pt"]
+    required_files = ["black_box.cbm", "transition_system.json", "vae.pt", "domain.json"]
     missing_files = [f for f in required_files if not os.path.exists(os.path.join(weights_dir, f))]
     weights_ok = len(missing_files) == 0
+
+    if not weights_ok and not args.retrain:
+        raise SystemExit(
+            f"FATAL: {weights_dir} is missing {', '.join(missing_files)}. Refusing to "
+            f"retrain implicitly (that would overwrite the trained black box / VAE). "
+            f"Pass --retrain explicitly if you really want to train from scratch."
+        )
 
     if weights_ok and not args.retrain:
         domain_persistence.load_domain(weights_dir)
         lmdp.load(weights_dir)
 
-        # REVISED+_pres baseline
         lmdp._fit_cases = train_cases
 
         pm_path = os.path.join(weights_dir, "pm_ground_truth.pt")
@@ -458,7 +319,6 @@ def main() -> None:
             lmdp.vae.set_ground_truth_transitions(torch.load(pm_path), args.gamma_conf)
             print(f"  Loaded ground-truth transition matrix from {pm_path}")
 
-        # REVISED+_pres baseline
         tdc_path = os.path.join(weights_dir, "declare_constraints.pt")
         if args.declare_lambda_tdc > 0.0:
             if os.path.exists(tdc_path):
@@ -470,7 +330,6 @@ def main() -> None:
                       f"{tdc_path} found — these weights were saved WITHOUT TDC active. "
                       f"Loaded VAE will behave as lambda_tdc=0.0 regardless of this flag. "
                       f"Use --retrain to train a TDC-active checkpoint.")
-        
         lmdp.vae.set_resource_lambda(lmdp.vae.lambda_res_tensor.item())
         if args.lambda_res > 0.0 and abs(args.lambda_res - lmdp.vae.lambda_res_tensor.item()) > 1e-9:
             print(f"  WARNING: --lambda-res={args.lambda_res} was passed, but the loaded "
@@ -543,7 +402,6 @@ def main() -> None:
 
         print(f"  Saved weights + domain snapshot to {weights_dir}")
 
-    # ── 3. Load TEST cases and re-assert the training-time domain ──────────
     section("3 / Test-set loading")
 
     test_cases = load_event_log_csv(args.test_csv, sample_n_cases=None)
@@ -595,6 +453,16 @@ def main() -> None:
               f"Test set: {n_before} -> {len(test_cases)} case(s) remaining "
               f"(matched by actual case_id, not position — safe regardless "
               f"of ordering).")
+
+    if args.case_ids:
+        wanted = {str(c) for c in args.case_ids}
+        test_cases = [c for c in test_cases if str(c.case_id) in wanted]
+        missing = sorted(wanted - {str(c.case_id) for c in test_cases})
+        print(f"  --case-ids: {len(test_cases)} case(s) selected")
+        if missing:
+            print(f"  WARNING: case IDs not found in the test set: {missing}")
+        if not test_cases:
+            raise SystemExit("None of the requested --case-ids is in the test set.")
 
     if args.case_offset:
         n_before = len(test_cases)
@@ -651,7 +519,7 @@ def main() -> None:
 
     section("3b / Pre-flight: cases per (length_bucket, milestone) cell")
 
-    preview_cell_counts = {}   # (bucket_label, milestone) -> n_cases
+    preview_cell_counts = {}
     preview_short_count = 0
     for c in test_cases:
         n = len(c.events)
@@ -665,20 +533,20 @@ def main() -> None:
             key = (b, milestone)
             preview_cell_counts[key] = preview_cell_counts.get(key, 0) + 1
 
-    LOW_COUNT_THRESHOLD = 5  
+    LOW_COUNT_THRESHOLD = 5
     print(f"  {'bucket':<28} {'milestone':>10} {'n_cases':>9}")
     low_count_cells = []
     for bucket_label in bucket_labels:
         for milestone in args.milestones:
             n_cases = preview_cell_counts.get((bucket_label, milestone), 0)
-            flag = "  <-- LOW" if n_cases < LOW_COUNT_THRESHOLD else ""
+            flag = "  <-- LOW" if n_cases < LOW_COUNT_THRESHOLD and not args.case_ids else ""
             print(f"  {bucket_label:<28} {milestone:>10} {n_cases:>9}{flag}")
             if n_cases < LOW_COUNT_THRESHOLD:
                 low_count_cells.append((bucket_label, milestone, n_cases))
     if preview_short_count:
         print(f"  {'excluded_short':<28} {'(fixed pass)':>10} {preview_short_count:>9}")
 
-    if low_count_cells:
+    if low_count_cells and not args.case_ids:
         print(f"\n  WARNING: {len(low_count_cells)} cell(s) have fewer than "
               f"{LOW_COUNT_THRESHOLD} cases — their validity/proximity/plausibility "
               f"means in bucket_milestone_summary.csv will be noisy. Consider "
@@ -692,37 +560,36 @@ def main() -> None:
               "Re-run without --dry-run once the cell counts above look right.")
         return
 
-    # ── 4. Phase 2 — run CF explanation at every (length-bucket, milestone) ─
-    #      cut point, plus a separate fixed-prefix pass for too-short cases.
     section("4 / Phase 2 — length-bucket x milestone CF explanations over test set")
 
     explanations_dir = os.path.join(out_dir, "explanations")
     os.makedirs(explanations_dir, exist_ok=True)
 
-    combined_summary = []   # one row per generated CF, across all test cases
-    slice_level_summary = []  # one row per (case, slice) — surrogate precision
-                               # is computed once per slice (not per CF), so it
-                               # gets its own table to avoid either dropping it
-                               # or duplicating/misweighting it across cf_k CFs
+    combined_summary = []
+    slice_level_summary = []
     n_cases_run = 0
     n_cases_failed = 0
     n_cf_total = 0
     n_slices_total = 0
 
     def run_one_slice(case, step, n, milestone_label, bucket_label, tag):
-        """
-        Runs explain() at one (case, step) cut point and appends results to
-        combined_summary / writes the per-case JSON. milestone_label is the
-        requested fraction (float) or None for the short-case fixed pass.
-        tag is used in the output filename to keep milestone- and
-        short-case-pass outputs from colliding.
-        Returns True on success, False on failure (already logged).
-        """
         nonlocal n_cases_run, n_cases_failed, n_cf_total
+
+        _resume_path = os.path.join(
+            explanations_dir,
+            f"case_{case.case_id}_step_{step}_{tag}_{args.contrast_mode}.json")
+        if os.environ.get("CONTEST_RESUME", "1") == "1" and os.path.exists(_resume_path):
+            try:
+                with open(_resume_path) as _rf:
+                    json.load(_rf)
+                print(f"  RESUME_SKIP case={case.case_id} step={step} {tag}", flush=True)
+                return True
+            except Exception:
+                print(f"  RESUME_RECOMPUTE (unreadable file) case={case.case_id} step={step} {tag}", flush=True)
 
         K = args.editable_history_steps
         editable_steps = list(range(max(1, step - K), step)) if K > 0 else None
- 
+
         try:
             explanation = lmdp.explain(
                 case=case,
@@ -731,6 +598,7 @@ def main() -> None:
                 verbose=False,
                 k=args.cf_k,
                 contrast_mode=args.contrast_mode,
+                require_target_match=args.require_target_match,
                 editable_steps=editable_steps,
                 debug_attempts_dir=args.debug_attempts_dir,
                 kpi_significance_threshold=args.kpi_significance_threshold,
@@ -768,7 +636,6 @@ def main() -> None:
         for expl in explanation["multiple_explanations"]:
             cf_r = expl["cf_result"]
 
-            # Manifold feasibility
             l_man, plaus_score = plausibility_score(cf_r.z_cf)
 
             record = {
@@ -787,11 +654,19 @@ def main() -> None:
                     "sparsity":              cf_r.sparsity,
                     "original_action_idx":   cf_r.original_action_idx,
                     "cf_action_idx":         cf_r.cf_action_idx,
+                    "surrogate_target_idx":  cf_r.target_action_idx,
+                    "hit_surrogate_target":  cf_r.hit_target,
                     "l_man":                 l_man,
                     "plausibility_score":    plaus_score,
                 },
                 "kpi_original":            expl.get("kpi_original"),
                 "kpi_counterfactual":      expl.get("kpi_counterfactual"),
+                "cf_pair_source":          expl.get("cf_pair_source"),
+                "surrogate_target_act":    expl.get("surrogate_target_act"),
+                "surrogate_target_res":    expl.get("surrogate_target_res"),
+                "orig_pair_is_candidate_under_cf_history": expl.get("orig_pair_is_candidate_under_cf_history"),
+                "kpi_original_cf_history":       expl.get("kpi_original_cf_history"),
+                "kpi_counterfactual_cf_history": expl.get("kpi_counterfactual_cf_history"),
                 "kpi_delta_pct":          expl.get("kpi_delta_pct"),
                 "kpi_significant":        expl.get("kpi_significant"),
                 "kpi_rank":               expl.get("kpi_rank"),
@@ -807,15 +682,19 @@ def main() -> None:
                 "trace_len":               n,
                 "length_bucket":           bucket_label,
                 "milestone":               milestone_label,
-                "prefix_fraction_actual":  step / n,  
+                "prefix_fraction_actual":  step / n,
                 "slice_idx":               step,
                 "target_rank":             expl["target_rank"],
                 "contrast_type":           expl.get("contrast_type", ""),
                 "contrast_mode_requested": expl.get("contrast_mode_requested", args.contrast_mode),
                 "verified_by_blackbox":    cf_r.verified_by_blackbox,
+                "cf_pair_source":          expl.get("cf_pair_source"),
+                "hit_surrogate_target":    expl.get("hit_surrogate_target"),
+                "orig_pair_is_candidate_under_cf_history": expl.get("orig_pair_is_candidate_under_cf_history"),
+                "kpi_original_cf_history":       expl.get("kpi_original_cf_history"),
+                "kpi_counterfactual_cf_history": expl.get("kpi_counterfactual_cf_history"),
                 "exit_reason":             cf_r.exit_reason,
                 "used_expulsion":          cf_r.used_expulsion,
-                # REVISED+_pres
                 "ldc_final_violation":     cf_r.ldc_final_violation,
                 "ldc_unavailable":         cf_r.ldc_unavailable,
                 "n_iterations":            cf_r.n_iterations,
@@ -823,7 +702,7 @@ def main() -> None:
                 "sparsity":                cf_r.sparsity,
                 "resource_valid":          expl.get("resource_valid", True),
                 "l_man":                   l_man,
-                "plausibility_score":      plaus_score, # Manifold plausibility score 
+                "plausibility_score":      plaus_score,
                 "surrogate_accuracy":         surr_prec.get("accuracy") if surr_prec else None,
                 "surrogate_precision_macro":  surr_prec.get("precision_macro") if surr_prec else None,
                 "kpi_original":            expl.get("kpi_original"),
@@ -885,8 +764,6 @@ def main() -> None:
                   f"({n_slices_total} slices attempted, {n_cases_run} succeeded, "
                   f"{n_cases_failed} failed, {n_cf_total} CFs total so far)")
 
-    # ── 5. Save combined summary CSV, surrogate-precision-per-slice CSV, ────
-    #      bucket x milestone aggregate, and manifest
     section("5 / Saving combined summary")
 
     import csv
@@ -939,7 +816,7 @@ def main() -> None:
             kpi_delta_vals  = [r["kpi_delta_pct"] for r in rows if r["kpi_delta_pct"] is not None]
             kpi_sig_vals    = [bool(r["kpi_significant"]) for r in rows if r["kpi_significant"] is not None]
             no_sig_kpi_vals = [bool(r["no_significant_kpi_cf"]) for r in slice_rows if r["no_significant_kpi_cf"] is not None]
-            
+
             agg_rows.append({
                 "length_bucket":          bucket_label,
                 "milestone":              milestone,
@@ -954,10 +831,9 @@ def main() -> None:
                 "mean_proximity_l2":      float(np.mean([r["proximity_latent_l2"] for r in rows])),
                 "mean_sparsity":          float(np.mean([r["sparsity"] for r in rows])),
                 "mean_n_iterations":      float(np.mean([r["n_iterations"] for r in rows])),
-                # REVISED+_pres baseline
                 "mean_ldc_final_violation": float(np.mean([r["ldc_final_violation"] for r in rows])),
                 "ldc_unavailable_rate":      float(np.mean([bool(r["ldc_unavailable"]) for r in rows])),
-                "mean_plausibility_score": float(np.mean([r["plausibility_score"] for r in rows])), # Manifold plausibility score 
+                "mean_plausibility_score": float(np.mean([r["plausibility_score"] for r in rows])),
                 "mean_l_man":              float(np.mean([r["l_man"] for r in rows])),
                 "mean_surrogate_accuracy":        float(np.mean(surr_acc_vals)) if surr_acc_vals else None,
                 "mean_surrogate_precision_macro":  float(np.mean(surr_prec_vals)) if surr_prec_vals else None,
@@ -1032,5 +908,142 @@ def main() -> None:
     print(f"  Run manifest           : {manifest_path}")
 
 
+METHOD_NAME = "REVISED+"
+METHOD_FOLDER = "revised_plus"
+
+
+def _summarize(explanations_dir):
+    files = sorted(Path(explanations_dir).glob("case_*.json"))
+    n_units, n_with_cf, n_cfs = 0, 0, 0
+    for f in files:
+        try:
+            with open(f) as fh:
+                n = int(json.load(fh).get("n_found", 0))
+        except Exception:
+            continue
+        n_units += 1
+        n_cfs += n
+        n_with_cf += n > 0
+    return files, n_units, n_with_cf, n_cfs
+
+
+def run(method_name, argv=None, from_python=False):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if any(a in argv for a in ("--verbose", "--dry-run", "-h", "--help")):
+        main(argv)
+        return None
+    import contextlib
+    import io
+    import re
+    import warnings
+
+    warnings.filterwarnings("ignore")
+    args = parse_args(argv)
+    what = f"case(s) {', '.join(args.case_ids)}" if args.case_ids else "the test cases"
+    print(f"Running {method_name} on {what} of {args.test_csv} "
+          f"(milestones {', '.join(str(m) for m in args.milestones)}) ...", flush=True)
+    start = time.time()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            main(argv)
+    except SystemExit:
+        raise
+    except BaseException:
+        lines = buf.getvalue().rstrip().splitlines()
+        if lines:
+            print("\n".join(lines[-20:]))
+        raise
+    out = buf.getvalue()
+    m = re.search(r"Per-case JSON\s*:\s*(.+?)/?\s*$", out, re.M)
+    explanations_dir = m.group(1).strip() if m else None
+    n_skipped = out.count("RESUME_SKIP")
+    minutes = (time.time() - start) / 60
+    print(f"Done in {minutes:.1f} min.")
+    if explanations_dir is None:
+        print("No unit was processed.")
+        return None
+    files, n_units, n_with_cf, n_cfs = _summarize(explanations_dir)
+    print(f"  Units in the results folder : {n_units}")
+    print(f"  Units with a counterfactual : {n_with_cf}")
+    print(f"  Counterfactuals found       : {n_cfs}")
+    if n_skipped:
+        how = "use resume=False" if from_python else "set CONTEST_RESUME=0"
+        print(f"  ({n_skipped} unit(s) were already in the folder and were not searched again. "
+              f"To search them again, {how}.)")
+    print(f"Results saved in {os.path.dirname(explanations_dir.rstrip('/'))}")
+    print(f"  one JSON per unit in {explanations_dir}/")
+    if from_python:
+        return _result(explanations_dir, n_units, n_with_cf, n_cfs, n_skipped, minutes)
+    extra = ""
+    cdir = Path("declare_constraints") / Path(args.test_csv).parent.name
+    if cdir.is_dir():
+        extra = f" --constraints {cdir}"
+    if len(files) == 1:
+        print(f"To read it: python -m evaluation.report {files[0]} --test-csv {args.test_csv}{extra}")
+    elif files:
+        print(f"To read one: python -m evaluation.report {explanations_dir}/<file>.json --test-csv {args.test_csv}{extra}")
+    return _result(explanations_dir, n_units, n_with_cf, n_cfs, n_skipped, minutes)
+
+
+def _result(explanations_dir, n_units, n_with_cf, n_cfs, n_skipped, minutes):
+    return {
+        "output_dir": os.path.dirname(explanations_dir.rstrip("/")),
+        "explanations_dir": explanations_dir,
+        "units": n_units,
+        "units_with_cf": n_with_cf,
+        "counterfactuals": n_cfs,
+        "skipped": n_skipped,
+        "minutes": round(minutes, 1),
+    }
+
+
+def explain(log, case_ids=None, milestones=None, output_dir=None, train_csv=None, test_csv=None,
+            weights_dir=None, resume=True, verbose=False, **options):
+    here = Path(os.path.relpath(Path(__file__).resolve().parent))
+    data = here / "case_studies" / log
+    train_csv = train_csv or str(data / "train_data.csv")
+    test_csv = test_csv or str(data / "test_data.csv")
+    weights_dir = weights_dir or str(here / "weights" / log)
+    output_dir = output_dir or str(Path("results") / METHOD_FOLDER / log)
+
+    argv = ["--train-csv", str(train_csv), "--test-csv", str(test_csv),
+            "--weights-dir", str(weights_dir), "--output-dir", str(output_dir)]
+    if case_ids is not None:
+        if isinstance(case_ids, (str, int)):
+            case_ids = [case_ids]
+        argv += ["--case-ids"] + [str(c) for c in case_ids]
+    if milestones is not None:
+        if isinstance(milestones, (int, float)):
+            milestones = [milestones]
+        argv += ["--milestones"] + [str(m) for m in milestones]
+    if verbose:
+        argv.append("--verbose")
+    for key, value in options.items():
+        flag = "--" + key.replace("_", "-")
+        if value is True:
+            argv.append(flag)
+        elif value is False or value is None:
+            continue
+        elif isinstance(value, (list, tuple)):
+            argv += [flag] + [str(v) for v in value]
+        else:
+            argv += [flag, str(value)]
+
+    old = os.environ.get("CONTEST_RESUME")
+    os.environ["CONTEST_RESUME"] = "1" if resume else "0"
+    try:
+        return run(METHOD_NAME, argv, from_python=True)
+    except SystemExit as e:
+        if e.code in (0, None):
+            return None
+        raise RuntimeError(str(e.code)) from None
+    finally:
+        if old is None:
+            os.environ.pop("CONTEST_RESUME", None)
+        else:
+            os.environ["CONTEST_RESUME"] = old
+
+
 if __name__ == "__main__":
-    main()
+    run(METHOD_NAME)

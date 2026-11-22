@@ -1,10 +1,9 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Iterable, List, Dict, Optional, Any
 import numpy as np
 import torch
 
 
-# Original global variables kept perfectly intact for downstream files
 ACTIVITIES: List[str] = []
 RESOURCES: List[str] = []
 ACT2IDX: Dict[str, int] = {}
@@ -13,30 +12,23 @@ IDX2ACT: Dict[int, str] = {}
 IDX2RES: Dict[int, str] = {}
 EVENT_DIM: int = 0
 
-# Keep global backward compatibility constants for files that reference them
 AMT_MIN = 0.0
 DENOM = 1.0
 
-# Dynamic registries for auto-discovered fields
 _SCALAR_NAMES: List[str] = []
 _CAT_NAMES: List[str] = []
 
-# Storage for bounds and vocabularies
 NUMERIC_MIN_MAX: Dict[str, tuple] = {}
-CAT_VOCABULARIES: Dict[str, Dict[str, int]] = {}  # {attr_name: {category_value: index}}
+CAT_VOCABULARIES: Dict[str, Dict[str, int]] = {}
 
-# Populated by build_resource_activity_matrix() below
-RESOURCE_ACTIVITY_MATRIX: np.ndarray = np.array([])  # shape (n_resources, n_activities)
+
+import numpy as np
+from typing import List
+
+RESOURCE_ACTIVITY_MATRIX: np.ndarray = np.array([])
 RESOURCE_ACTIVITY_COUNTS = None
 
-
 def build_resource_activity_matrix(cases: "List[Case]", min_observations: int = 1) -> np.ndarray:
-    """
-    Build a binary compatibility matrix M where:
-      M[res_idx, act_idx] = 1  if resource res performed activity act
-                                at least min_observations times in the log
-      M[res_idx, act_idx] = 0  otherwise (treat as infeasible)
-    """
     global RESOURCE_ACTIVITY_MATRIX
     global RESOURCE_ACTIVITY_COUNTS
 
@@ -55,52 +47,36 @@ def build_resource_activity_matrix(cases: "List[Case]", min_observations: int = 
 
 
 def pm_row_entropy_floor(PM: torch.Tensor, cases: List["Case"], n_activities: int) -> float:
-    """
-    Theoretical best diff_ero_loss can reach: the weighted-average row
-    entropy of PM (conditional entropy of next-activity given current
-    activity), weighted by how often each activity is actually visited
-    as a "current state" in the log. 
-    """
     visit_counts = torch.zeros(n_activities)
     for c in cases:
-        for e in c.events[:-1]:   # exclude last event: it's never a "current state" with a successor
+        for e in c.events[:-1]:
             visit_counts[ACT2IDX[e.activity]] += 1
     visit_freq = visit_counts / visit_counts.sum().clamp(min=1e-8)
 
-    row_entropy = -(PM * torch.log(PM.clamp(min=1e-8))).sum(dim=1)  # (n_act,)
+    row_entropy = -(PM * torch.log(PM.clamp(min=1e-8))).sum(dim=1)
     return (visit_freq * row_entropy).sum().item()
 
-
 def is_feasible_pair(activity: str, resource: str) -> bool:
-    """Quick lookup for a single (activity, resource) pair."""
     act_idx = ACT2IDX.get(activity, -1)
     res_idx = RES2IDX.get(resource, -1)
     if act_idx < 0 or res_idx < 0:
         return False
     if RESOURCE_ACTIVITY_MATRIX.size == 0:
-        return True   # matrix not built yet — don't block
+        return True
     return bool(RESOURCE_ACTIVITY_MATRIX[res_idx, act_idx])
 
-
-# Features that are NOT independently controllable are deterministic
 DERIVED_FEATURE_PREFIXES = ("freq_",)
-
 
 def is_derived_feature(name: str) -> bool:
     return name.startswith(DERIVED_FEATURE_PREFIXES)
 
-
-# Populated by discover_case_invariant_features() below
 CASE_INVARIANT_FEATURES: List[str] = []
 
-# Populated by discover_activity_determined_categoricals() below
+
 ACTIVITY_DETERMINED_CATEGORICALS: List[str] = []
-# Populated by build_activity_to_category_maps() below
 ACTIVITY_TO_CATEGORY_MAPS: Dict[str, np.ndarray] = {}
 
-
 def categorical_block_columns(cat_name: str) -> List[str]:
-
     vocab = CAT_VOCABULARIES.get(cat_name, {})
     if not vocab:
         return []
@@ -108,7 +84,6 @@ def categorical_block_columns(cat_name: str) -> List[str]:
 
 
 def discover_activity_determined_categoricals(cases: "List[Case]") -> List[str]:
-
     global ACTIVITY_DETERMINED_CATEGORICALS
 
     determined = []
@@ -128,7 +103,6 @@ def discover_activity_determined_categoricals(cases: "List[Case]") -> List[str]:
 
 
 def build_activity_to_category_maps(cases: "List[Case]") -> Dict[str, np.ndarray]:
-
     global ACTIVITY_TO_CATEGORY_MAPS
 
     maps: Dict[str, np.ndarray] = {}
@@ -154,11 +128,6 @@ def build_activity_to_category_maps(cases: "List[Case]") -> Dict[str, np.ndarray
 
 
 def discover_case_invariant_features(cases: "List[Case]", tol: float = 1e-9) -> List[str]:
-    """
-    Determine which columns of feature_names() are case-invariant.
-    A feature is reported as invariant only if it is constant within EVERY
-    multi-event case in the sample (not just most).
-    """
     global CASE_INVARIANT_FEATURES
 
     names = feature_names()
@@ -173,7 +142,7 @@ def discover_case_invariant_features(cases: "List[Case]", tol: float = 1e-9) -> 
         if len(case.events) < 2:
             continue
         any_multi_event_case = True
-        mat = case.to_matrix()  # (n_events, EVENT_DIM)
+        mat = case.to_matrix()
         col_range = mat.max(axis=0) - mat.min(axis=0)
         is_constant &= (col_range <= tol)
 
@@ -192,20 +161,10 @@ def discover_case_invariant_features(cases: "List[Case]", tol: float = 1e-9) -> 
 
 
 def denormalize_feature(feature_name: str, value: float) -> float:
-    """
-    Map a normalized feature value back to real-world units using the bounds
-    recorded in NUMERIC_MIN_MAX at domain-setup time. Features without
-    recorded bounds (categorical one-hots, activity/resource one-hots,
-    freq_* counts) are returned unchanged, since those are not on a
-    min-max-normalized real-valued scale.
-    """
     if feature_name in NUMERIC_MIN_MAX:
         amin, amax = NUMERIC_MIN_MAX[feature_name]
         denom = amax - amin if amax > amin else 1.0
         return value * denom + amin
-    # Backward-compat fallback for AMOUNT_REQ specifically, in case it was
-    # normalized via the legacy AMT_MIN / DENOM globals instead of being
-    # registered in NUMERIC_MIN_MAX.
     if feature_name == "AMOUNT_REQ" and "AMOUNT_REQ" not in NUMERIC_MIN_MAX:
         return value * DENOM + AMT_MIN
     return value
@@ -215,9 +174,6 @@ def set_domain(activities: List[str],
                resources: List[str],
                cases_log: Optional[List[Any]] = None,
                discovered_vocabularies: Optional[Dict[str, List[str]]] = None) -> None:
-    """
-    
-    """
     ACTIVITIES.clear()
     ACTIVITIES.extend(list(activities))
     RESOURCES.clear()
@@ -238,15 +194,6 @@ def set_domain(activities: List[str],
     _CAT_NAMES.clear()
     CAT_VOCABULARIES.clear()
 
-    # 1. Discover schemas from the data log by inspecting Python types.
-    #    The `key in [...]` guard below is a defensive no-op under the
-    #    current loader contract: "activity"/"resource" are handled via
-    #    their own dedicated one-hot blocks below (never scalar/categorical
-    #    discovered columns), and "remaining_time" is carried as its own
-    #    Event field rather than an attributes-dict key, so none of these
-    #    three keys should ever actually appear in sample_event.attributes.
-    #    Left in place as a safety net for any future Event-construction
-    #    path that doesn't go through the standard loader.
     if cases_log and len(cases_log) > 0 and len(cases_log[0].events) > 0:
         sample_event = cases_log[0].events[0]
         for key, val in sample_event.attributes.items():
@@ -261,14 +208,11 @@ def set_domain(activities: List[str],
         _SCALAR_NAMES.sort()
         _CAT_NAMES.sort()
 
-    # 2. Build Categorical Vocabulary Lookups
     if discovered_vocabularies:
         for attr_name, categories in discovered_vocabularies.items():
             if attr_name in _CAT_NAMES:
                 CAT_VOCABULARIES[attr_name] = {cat: idx for idx, cat in enumerate(sorted(categories))}
 
-    # 3. Compute Total Dimensionality
-    # (Core fields + Discovered One-Hots + Discovered Scalars + Sequence Counts)
     total_cat_dim = sum(len(vocab) for vocab in CAT_VOCABULARIES.values())
 
     EVENT_DIM = len(ACTIVITIES) + len(RESOURCES) + total_cat_dim + len(_SCALAR_NAMES) + len(ACTIVITIES)
@@ -283,7 +227,6 @@ def feature_names() -> List[str]:
     names.extend([f"freq_{a}" for a in ACTIVITIES])
     return names
 
-
 def compute_trace_frequencies(events_up_to_t: Iterable) -> np.ndarray:
     freq_vector = np.zeros(len(ACTIVITIES), dtype=np.float32)
     for ev in events_up_to_t:
@@ -291,21 +234,14 @@ def compute_trace_frequencies(events_up_to_t: Iterable) -> np.ndarray:
             freq_vector[ACT2IDX[ev.activity]] += 1.0
     return freq_vector / max(1.0, float(len(list(events_up_to_t))))
 
-
 def build_activity_transition_matrix(cases, n_activities):
-    """PM: (n_activities, n_activities) row-stochastic ground-truth transition
-    matrix, mined by bigram frequency counting over the training log.
-    PM[a, a'] = empirical P(next activity = a' | current activity = a).
-
-    This is the CONTEST ground-truth SDFA — a raw empirical directly-follows
-    (bigram co-occurrence) matrix."""
     counts = torch.zeros(n_activities, n_activities)
     for c in cases:
         act_idxs = [ACT2IDX[e.activity] for e in c.events]
         for a_t, a_t1 in zip(act_idxs[:-1], act_idxs[1:]):
             counts[a_t, a_t1] += 1.0
     row_sums = counts.sum(dim=1, keepdim=True).clamp(min=1e-8)
-    PM = counts / row_sums   # row-stochastic SDFA
+    PM = counts / row_sums
     return PM
 
 
@@ -347,7 +283,6 @@ class Event:
 
         vectors = []
 
-        # 1. Base Core Categories
         act_oh = np.zeros(len(ACTIVITIES), dtype=np.float32)
         if self.activity in ACT2IDX:
             act_oh[ACT2IDX[self.activity]] = 1.0
@@ -358,7 +293,6 @@ class Event:
             res_oh[RES2IDX[self.resource]] = 1.0
         vectors.append(res_oh)
 
-        # 2. Dynamic Discovered Categorical One-Hots
         for attr in _CAT_NAMES:
             vocab = CAT_VOCABULARIES.get(attr, {})
             oh = np.zeros(len(vocab), dtype=np.float32)
@@ -367,7 +301,6 @@ class Event:
                 oh[vocab[val]] = 1.0
             vectors.append(oh)
 
-        # 3. Dynamic Discovered Normalized Scalars
         scalar_list = []
         for name in _SCALAR_NAMES:
             val = float(self.attributes.get(name, 0.0))
@@ -378,7 +311,6 @@ class Event:
             scalar_list.append(val)
         vectors.append(np.array(scalar_list, dtype=np.float32))
 
-        # 4. Context Frequencies
         vectors.append(compute_trace_frequencies(history_events))
 
         return np.concatenate(vectors)

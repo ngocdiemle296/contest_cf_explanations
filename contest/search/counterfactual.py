@@ -1,22 +1,12 @@
-"""
-Counterfactual Search Phase
-
-Given a black-box recommendation for a running case, search the latent space learned by the VAE for a nearby latent point z* 
-whose decoded trace would have led the black box to recommend a different (activity, resource) pair.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass, field
-from typing import Callable, Optional, List
+from typing import Callable, Optional, Tuple, List
 import numpy as np
 
-# Local surrogate g_ξ
+
 class LocalSurrogate(nn.Module):
-    """
-    Lightweight MLP trained in the latent neighbourhood of z_t.
-    """
 
     def __init__(
         self,
@@ -55,13 +45,14 @@ class LocalSurrogate(nn.Module):
         return self.net(z)
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        local_logits = self.forward_local(z)          # (B, n_local)
+        local_logits = self.forward_local(z)
         full = local_logits.new_full((z.size(0), self.n_actions_full), float("-inf"))
         full[:, self.feasible_indices] = local_logits
         return full
 
     def predict(self, z: torch.Tensor) -> torch.Tensor:
-        logits = self.forward(z)  
+        logits = self.forward(z)
+
         from contest.models.blackbox import non_recommendable_action_indices
 
         for bad_idx in non_recommendable_action_indices():
@@ -71,29 +62,23 @@ class LocalSurrogate(nn.Module):
 
     def fit(
         self,
-        z_center: torch.Tensor,           # (1, latent_dim) reference point
-        black_box_fn: Callable,           # f: z → action_idx
+        z_center: torch.Tensor,
+        black_box_fn: Callable,
         n_samples: int = 500,
         rho: float = 0.3,
         n_epochs: int = 200,
         lr: float = 1e-3,
         device: torch.device = torch.device("cpu"),
     ) -> List[float]:
-        """
-        Sample neighbourhood, query black-box, fit surrogate with kernel weights.
-        Returns training loss history.
-        """
         self.train()
         self.to(device)
         z_center = z_center.to(device)
 
-        # Draw samples 
         eps = torch.randn(n_samples, z_center.size(-1), device=device) * rho
-        z_samples = z_center + eps   # (N, latent_dim)
+        z_samples = z_center + eps
 
-        # Query black-box for labels 
         with torch.no_grad():
-            labels_full = black_box_fn(z_samples)   # (N,) int64
+            labels_full = black_box_fn(z_samples)
 
         labels_local = self.full_to_local[labels_full]
         valid = labels_local != -100
@@ -107,15 +92,15 @@ class LocalSurrogate(nn.Module):
                 f"narrow — check RESOURCE_ACTIVITY_MATRIX's min_observations."
             )
 
-        dist_sq = (eps ** 2).sum(dim=-1)       # (N,)
-        kappa = torch.exp(-dist_sq / (2 * rho ** 2)) * valid.float()   # (N,)
+        dist_sq = (eps ** 2).sum(dim=-1)
+        kappa = torch.exp(-dist_sq / (2 * rho ** 2)) * valid.float()
 
         optimiser = torch.optim.Adam(self.parameters(), lr=lr)
         history = []
-        safe_labels_local = labels_local.clamp(min=0)  
+        safe_labels_local = labels_local.clamp(min=0)
         for _ in range(n_epochs):
-            local_logits = self.forward_local(z_samples)     # (N, n_local)
-            ce = F.cross_entropy(local_logits, safe_labels_local, reduction="none")   # (N,)
+            local_logits = self.forward_local(z_samples)
+            ce = F.cross_entropy(local_logits, safe_labels_local, reduction="none")
             denom = kappa.sum().clamp(min=1e-8)
             loss = (kappa * ce).sum() / denom
             optimiser.zero_grad()
@@ -136,10 +121,6 @@ class LocalSurrogate(nn.Module):
         rho: Optional[float] = None,
         device: torch.device = torch.device("cpu"),
     ) -> dict:
-        """
-        Held-out precision/recall of g_ξ vs the real black-box f, evaluated on a
-        fresh neighbourhood sample.
-        """
         if rho is None:
             raise ValueError("Pass the same rho used in .fit() explicitly — "
                               "it is not stored on the module.")
@@ -151,8 +132,8 @@ class LocalSurrogate(nn.Module):
         eps = torch.randn(n_holdout, z_center.size(-1), device=device) * rho
         z_samples = z_center + eps
 
-        y_true = black_box_fn(z_samples).cpu().numpy()      # (N,) real labels, FULL space
-        y_pred = self.predict(z_samples).cpu().numpy()      # (N,) surrogate labels, FULL space
+        y_true = black_box_fn(z_samples).cpu().numpy()
+        y_pred = self.predict(z_samples).cpu().numpy()
 
         accuracy = float((y_true == y_pred).mean())
 
@@ -166,7 +147,7 @@ class LocalSurrogate(nn.Module):
                 support_per_class[c] = support
             n_pred_c = int((y_pred == c).sum())
             if n_pred_c == 0:
-                continue   # precision undefined for classes surrogate model never predicts
+                continue
             tp = int(((y_pred == c) & (y_true == c)).sum())
             precision_per_class[c] = tp / n_pred_c
 
@@ -193,35 +174,34 @@ class LocalSurrogate(nn.Module):
         }
 
 
-# Counterfactual search
-
 @dataclass
 class CounterfactualResult:
-    z_cf: torch.Tensor              # optimal z*
+    z_cf: torch.Tensor
     converged: bool
     n_iterations: int
-    proximity: float                # How close to original z_t in latent space
-    sparsity: int                   # Number of changed features in decoded trace
-    verified_by_blackbox: bool      # If the pair is flipped
-    cf_action_idx: int              # CF pair
-    original_action_idx: int        # Original pair
+    proximity: float
+    sparsity: int
+    verified_by_blackbox: bool
+    cf_action_idx: int
+    original_action_idx: int
     loss_history: List[float] = field(default_factory=list)
+
     exit_reason: str = "max_iter"
     used_expulsion: bool = False
 
+    target_action_idx: Optional[int] = None
+    hit_target: Optional[bool] = None
+
 
 class CounterfactualSearch:
-    """
-    Gradient-descent search in latent space.
-    """
 
     def __init__(
         self,
         latent_dim: int,
-        lambda1: float = 0.5,    # manifold weight
-        lambda2: float = 0.3,    # sparsity weight
-        lambda3: float = 1.5,    # classification constrant weight
-        delta: float = 0.1,      # margin threshold
+        lambda1: float = 0.5,
+        lambda2: float = 0.3,
+        lambda3: float = 1.5,
+        delta: float = 0.1,
         lr: float = 0.05,
         max_iter: int = 200,
         patience: int = 100,
@@ -238,7 +218,6 @@ class CounterfactualSearch:
         self.device = device
 
     def _manifold_penalty(self, z: torch.Tensor) -> torch.Tensor:
-        
         return 0.5 * (z ** 2).sum(dim=-1).mean()
 
     def _sparsity_approx(
@@ -247,21 +226,20 @@ class CounterfactualSearch:
         z_orig: torch.Tensor,
         decode_fn: Optional[Callable] = None,
     ) -> torch.Tensor:
-        
         if decode_fn is None:
             return (z_cf - z_orig).abs().sum(dim=-1).mean()
-    
+
         dec_cf = decode_fn(z_cf)
         dec_orig = decode_fn(z_orig)
-    
+
         from contest.data import event_log
-    
+
         n_act = len(event_log.ACTIVITIES)
         n_res = len(event_log.RESOURCES)
-    
+
         act_cf, act_orig = dec_cf[..., :n_act], dec_orig[..., :n_act]
         act_dist = (F.softmax(act_cf, dim=-1) - F.softmax(act_orig, dim=-1)).abs().sum(dim=-1)
-    
+
         if n_res > 0:
             res_cf = dec_cf[..., n_act:n_act + n_res]
             res_orig = dec_orig[..., n_act:n_act + n_res]
@@ -281,25 +259,27 @@ class CounterfactualSearch:
 
         per_timestep = act_dist + res_dist
         return per_timestep.mean() + scalar_dist.mean()
- 
+
     def search(
         self,
-        z_t: torch.Tensor,                   
-        original_action_idx: int,            
-        surrogate: LocalSurrogate,           
-        black_box_fn: Callable,              
+        z_t: torch.Tensor,
+        original_action_idx: int,
+        surrogate: LocalSurrogate,
+        black_box_fn: Callable,
         decode_fn: Optional[Callable] = None,
-        step: int = None,                      # current trace step 
-        target_action_idx: Optional[int] = None,  # Instead of simply pushing away from the original recommendation, the loss function will actively pull the latent coordinates toward that specific target alternative.
+        step: int = None,
+        target_action_idx: Optional[int] = None,
         past_cf_vectors: Optional[List[torch.Tensor]] = None,
         raw_sequence_matrix: Optional[np.ndarray] = None,
+        accept_fn: Optional[Callable[[int], bool]] = None,
     ) -> CounterfactualResult:
-        """
-        Run optimisation to find z* that flips the recommendation.
-        """
+        if accept_fn is None:
+            def accept_fn(idx: int) -> bool:
+                return idx != original_action_idx
+
+
         z_t = z_t.to(self.device).detach()
 
-        # Initialise z' near z_t with small noise
         z_cf = (z_t + 0.01 * torch.randn_like(z_t)).requires_grad_(True)
         optimiser = torch.optim.Adam([z_cf], lr=self.lr)
 
@@ -308,24 +288,20 @@ class CounterfactualSearch:
         stagnant  = 0
         loss_hist: List[float] = []
 
-        exit_reason   = "max_iter"   
-        used_expulsion = False      
+        exit_reason   = "max_iter"
+        used_expulsion = False
 
         surrogate.eval()
 
         for it in range(self.max_iter):
             optimiser.zero_grad()
 
-            # Proximity: d(z_t, z') 
             prox = ((z_t - z_cf) ** 2).sum()
 
-            # Manifold penalty
             l_man = self._manifold_penalty(z_cf)
 
-            # Sparsity (L1 proxy)
             l_spar = self._sparsity_approx(z_cf, z_t, decode_fn)
 
-            # Classification constraint: max-margin hinge
             logits    = surrogate(z_cf)
             act_score = logits[0, original_action_idx]
 
@@ -338,7 +314,7 @@ class CounterfactualSearch:
                 margin_diff = act_score - max_other + self.delta
 
             l_class = torch.log1p(torch.exp(margin_diff))
-            
+
             l_repulsion = 0.0
             if past_cf_vectors:
                 for past_z in past_cf_vectors:
@@ -364,6 +340,7 @@ class CounterfactualSearch:
 
             optimiser.step()
 
+
             with torch.no_grad():
                 deviation = z_cf - z_t
                 clipped_deviation = torch.clamp(deviation, min=-1.5, max=1.5)
@@ -371,7 +348,6 @@ class CounterfactualSearch:
 
             loss_hist.append(loss.item())
 
-            # Early stopping
             if loss.item() < best_loss:
                 best_loss = loss.item()
                 best_z    = z_cf.detach().clone()
@@ -379,41 +355,28 @@ class CounterfactualSearch:
             else:
                 stagnant += 1
 
-            # Check if surrogate already flips
             with torch.no_grad():
-                # Query the real black-box via the latent oracle wrapper
-                real_bb_pred = black_box_fn(z_cf).item()
-
-                # ONLY stop early if we have truly, verified-flipped the real model!
-                if target_action_idx is not None:
-                    if real_bb_pred == target_action_idx:
-                        best_z = z_cf.detach().clone()
-                        exit_reason = "flipped"
-                        break
-                else:
-                    if real_bb_pred != original_action_idx:
-                        best_z = z_cf.detach().clone()
-                        exit_reason = "flipped"
-                        break
+                real_bb_pred = int(black_box_fn(z_cf).item())
+                if accept_fn(real_bb_pred):
+                    best_z = z_cf.detach().clone()
+                    exit_reason = "flipped"
+                    break
 
             if stagnant >= self.patience:
                 exit_reason = "patience_exhausted"
                 break
 
-        # Verification against real black-box 
         with torch.no_grad():
-            cf_action = black_box_fn(best_z).item()
-            verified   = (cf_action != original_action_idx)
+            cf_action = int(black_box_fn(best_z).item())
+            verified   = bool(accept_fn(cf_action))
 
-        # Proximity in latent space
         prox_val = ((z_t - best_z) ** 2).sum().item()
 
-        # Sparsity count in decoded space
         if decode_fn is not None:
 
             with torch.no_grad():
                 d_cf   = decode_fn(best_z).squeeze(0)
-            
+
             if raw_sequence_matrix is not None:
                 if isinstance(raw_sequence_matrix, np.ndarray):
                     d_orig = torch.as_tensor(
@@ -452,24 +415,24 @@ class CounterfactualSearch:
                 ]
                 if scalar_indices:
                     free_scalar_alias_groups = [
-                        {"AMOUNT_REQ", "RequestedAmount"}, 
+                        {"AMOUNT_REQ", "RequestedAmount"},
                         {"Leucocytes"},
                         {"CRP"},
-                        {"LacticAcid"}, {"case:SUMleges"},
+                        {"LacticAcid"}, {"case:SUMleges", "SUMleges"},
                     ]
                     free_scalar_names = set().union(*free_scalar_alias_groups)
- 
+
                     idx_t = torch.tensor(scalar_indices, dtype=torch.long, device=d_orig.device)
                     scalar_delta = (d_cf[T - 1, idx_t] - d_orig[T - 1, idx_t]).abs()
- 
+
                     for name, delta in zip(
                         (all_features[i] for i in scalar_indices), scalar_delta
                     ):
                         if name in free_scalar_names:
-                            sparsity += 1  # free scalar: unconditional, matches blackbox.py
+                            sparsity += 1
                         elif delta.item() > 0.05:
-                            sparsity += 1  # 
-                    
+                            sparsity += 1
+
                 free_categorical_group_names = ["LoanGoal", "ApplicationType", "CLOSURE_TYPE", "CLOSURE_REASON"]
                 for _grp_name in free_categorical_group_names:
                     _col_names = event_log.categorical_block_columns(_grp_name)
@@ -499,4 +462,6 @@ class CounterfactualSearch:
             loss_history=loss_hist,
             exit_reason=exit_reason,
             used_expulsion=used_expulsion,
+            target_action_idx=target_action_idx,
+            hit_target=(None if target_action_idx is None else cf_action == target_action_idx),
         )

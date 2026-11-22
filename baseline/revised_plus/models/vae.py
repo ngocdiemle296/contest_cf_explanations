@@ -1,15 +1,7 @@
-"""
-LSTM-VAE: encodes a variable-length process trace σ_t into a continuous
-latent state z_t ~ N(μ_t, σ_t²) suitable for counterfactual search.
-
-Architecture:
-  Encoder: Bidirectional LSTM → Linear → (μ, log σ²)
-  Decoder: Linear → LSTM → Linear (reconstructs event sequence)
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal, kl_divergence
 from typing import Tuple, Optional
 import logging
 
@@ -32,11 +24,11 @@ def resource_feasibility_loss(x_hat, mask, compat_matrix):
 
 def diff_ero_loss(x_hat, act_seq, mask, PM_ground_truth):
     n_act = PM_ground_truth.size(0)
-    O = F.softmax(x_hat[..., :n_act], dim=-1)   # (B,T,n_act)
+    O = F.softmax(x_hat[..., :n_act], dim=-1)
 
-    flat_idx  = act_seq[:, :-1].reshape(-1)        # a_t, unchanged
-    flat_O    = O[:, 1:, :].reshape(-1, n_act)      # decoder's dist at t+1
-    flat_mask = (mask[:, :-1] * mask[:, 1:]).reshape(-1)  # both t and t+1 must be valid
+    flat_idx  = act_seq[:, :-1].reshape(-1)
+    flat_O    = O[:, 1:, :].reshape(-1, n_act)
+    flat_mask = (mask[:, :-1] * mask[:, 1:]).reshape(-1)
 
     O_b = torch.zeros(n_act, n_act, device=O.device)
     counts = torch.zeros(n_act, device=O.device)
@@ -50,12 +42,6 @@ def diff_ero_loss(x_hat, act_seq, mask, PM_ground_truth):
     return ce
 
 def declare_soft_violation(name, a_idx, b_idx, O, mask=None):
-    """
-    Differentiable soft-violation score for ONE mined python.iBCM Constraint,
-    in [0, ~1] where higher = more violated. O: (B,T,n_act) softmax probs
-    over the decoder's activity block. mask: (B,T) or None (all-ones,
-    single-trace CF-search usage where every decoded position is valid).
-    """
     B, T, _ = O.shape
     if mask is None:
         mask = torch.ones(B, T, device=O.device)
@@ -95,6 +81,7 @@ def declare_soft_violation(name, a_idx, b_idx, O, mask=None):
 
     return torch.zeros((), device=O.device)
 
+
 _DECLARE_FAMILY = {
     "absence": "absence",
     "exactly": "presence", "exactly2": "presence", "existence3": "presence",
@@ -110,9 +97,6 @@ _DECLARE_FAMILY = {
 
 
 def declare_soft_violation_batch(names, a_idxs, b_idxs, O, mask=None):
-    """
-    Returns a scalar: mean violation score across all K constraints.
-    """
     device = O.device
     B, T, n_act = O.shape
     K = len(names)
@@ -121,37 +105,35 @@ def declare_soft_violation_batch(names, a_idxs, b_idxs, O, mask=None):
     if mask is None:
         mask = torch.ones(B, T, device=device)
 
-    a_idxs_t = torch.as_tensor(a_idxs, dtype=torch.long, device=device)  # (K,)
-    b_idxs_t = torch.as_tensor(b_idxs, dtype=torch.long, device=device)  # (K,)
+    a_idxs_t = torch.as_tensor(a_idxs, dtype=torch.long, device=device)
+    b_idxs_t = torch.as_tensor(b_idxs, dtype=torch.long, device=device)
 
-    # Gather ALL constraints' a/b activity slices in one index
-    Oa_all = O[..., a_idxs_t] * mask.unsqueeze(-1)   # (B,T,K)
-    Ob_all = O[..., b_idxs_t] * mask.unsqueeze(-1)   # (B,T,K)
+    Oa_all = O[..., a_idxs_t] * mask.unsqueeze(-1)
+    Ob_all = O[..., b_idxs_t] * mask.unsqueeze(-1)
 
-    occ_a_all = 1.0 - torch.prod((1.0 - Oa_all).clamp(min=0.0, max=1.0), dim=1)  # (B,K)
-    occ_b_all = 1.0 - torch.prod((1.0 - Ob_all).clamp(min=0.0, max=1.0), dim=1)  # (B,K)
-    denom = mask.sum(dim=1).clamp(min=1).unsqueeze(-1)  # (B,1) broadcasts against (B,K)
+    occ_a_all = 1.0 - torch.prod((1.0 - Oa_all).clamp(min=0.0, max=1.0), dim=1)
+    occ_b_all = 1.0 - torch.prod((1.0 - Ob_all).clamp(min=0.0, max=1.0), dim=1)
+    denom = mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
 
-    cum_future_b_all = torch.flip(torch.cumsum(torch.flip(Ob_all, dims=[1]), dim=1), dims=[1])  # (B,T,K)
-    cum_past_a_all = torch.cumsum(Oa_all, dim=1)  # (B,T,K)
+    cum_future_b_all = torch.flip(torch.cumsum(torch.flip(Ob_all, dims=[1]), dim=1), dims=[1])
+    cum_past_a_all = torch.cumsum(Oa_all, dim=1)
 
-    resp_all     = (Oa_all * (1.0 - cum_future_b_all)).sum(dim=1) / denom  # (B,K)
-    prec_all     = (Ob_all * (1.0 - cum_past_a_all)).sum(dim=1) / denom   # (B,K)
-    not_succ_all = (Oa_all * cum_future_b_all).sum(dim=1) / denom          # (B,K)
+    resp_all     = (Oa_all * (1.0 - cum_future_b_all)).sum(dim=1) / denom
+    prec_all     = (Ob_all * (1.0 - cum_past_a_all)).sum(dim=1) / denom
+    not_succ_all = (Oa_all * cum_future_b_all).sum(dim=1) / denom
 
-    last_idx = (mask.sum(dim=1).clamp(min=1).long() - 1)  # (B,)
+    last_idx = (mask.sum(dim=1).clamp(min=1).long() - 1)
     batch_ar = torch.arange(B, device=device)
-    last_p_all = O[batch_ar.unsqueeze(1), last_idx.unsqueeze(1), a_idxs_t.unsqueeze(0)]  # (B,K)
-    init_p_all = O[:, 0, a_idxs_t]  # (B,K)
+    last_p_all = O[batch_ar.unsqueeze(1), last_idx.unsqueeze(1), a_idxs_t.unsqueeze(0)]
+    init_p_all = O[:, 0, a_idxs_t]
 
     result = torch.zeros(B, K, device=device)
 
-    # Group column indices by formula family
     family_cols: dict = {}
     for i, name in enumerate(names):
         fam = _DECLARE_FAMILY.get(name)
         if fam is None:
-            continue  # unrecognized template = 0
+            continue
         family_cols.setdefault(fam, []).append(i)
 
     for fam, cols in family_cols.items():
@@ -179,10 +161,6 @@ def declare_soft_violation_batch(names, a_idxs, b_idxs, O, mask=None):
 
 
 def trace_declare_loss(x_hat, mask, declare_constraints, n_act):
-    """
-    L_TDC: Aggregates declare_soft_violation() over
-    every mined python.iBCM.Constraint object 
-    """
     if not declare_constraints:
         return torch.zeros((), device=x_hat.device)
 
@@ -203,11 +181,6 @@ def trace_declare_loss(x_hat, mask, declare_constraints, n_act):
 
 
 class LSTMEncoder(nn.Module):
-    """
-    Bi-directional LSTM encoder.
-    Input:  (batch, T, event_dim)
-    Output: μ_t, log_σ²_t  each of shape (batch, latent_dim)
-    """
 
     def __init__(self, event_dim: int, hidden_dim: int, latent_dim: int, num_layers: int = 2):
         super().__init__()
@@ -223,17 +196,13 @@ class LSTMEncoder(nn.Module):
         self.fc_logvar = nn.Linear(hidden_dim * 2, latent_dim)
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        x:       (B, T_max, event_dim) — padded traces
-        lengths: (B,)                  — actual trace lengths
-        """
         packed = nn.utils.rnn.pack_padded_sequence(
             x, lengths.cpu(), batch_first=True, enforce_sorted=False
         )
         _, (h_n, _) = self.lstm(packed)
-        h_fwd = h_n[-2]   # (B, hidden_dim)
-        h_bwd = h_n[-1]   # (B, hidden_dim)
-        h = torch.cat([h_fwd, h_bwd], dim=-1)   # (B, hidden_dim*2)
+        h_fwd = h_n[-2]
+        h_bwd = h_n[-1]
+        h = torch.cat([h_fwd, h_bwd], dim=-1)
 
         mu     = self.fc_mu(h)
         logvar = self.fc_logvar(h)
@@ -241,11 +210,6 @@ class LSTMEncoder(nn.Module):
 
 
 class LSTMDecoder(nn.Module):
-    """
-    LSTM decoder: z_t → reconstructed event sequence.
-    Input:  z of shape (batch, latent_dim), target length T
-    Output: (batch, T, event_dim)
-    """
 
     def __init__(self, latent_dim: int, hidden_dim: int, event_dim: int, num_layers: int = 2):
         super().__init__()
@@ -264,14 +228,6 @@ class LSTMDecoder(nn.Module):
         self.output_proj = nn.Linear(hidden_dim, event_dim)
 
     def forward(self, z: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """
-        Teacher-forced decode. 
-        At every step, it's fed the ground-truth previous event (shifted right) as input.
-
-        z:      (B, latent_dim)
-        target: (B, T, event_dim)   — teacher-forced input (SOS + first T-1 events)
-        Returns reconstructed: (B, T, event_dim)
-        """
         B = z.size(0)
         h0 = self.z_to_h0(z).view(B, self.num_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
         c0 = self.z_to_c0(z).view(B, self.num_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
@@ -280,10 +236,6 @@ class LSTMDecoder(nn.Module):
         return self.output_proj(out)
 
     def decode_from_z(self, z: torch.Tensor, seq_len: int, event_dim: int, device: torch.device) -> torch.Tensor:
-        """
-        Autoregressive decode (no teacher forcing). 
-        At every step, the decoder is fed its own previous-step prediction as input.
-        """
         B = z.size(0)
         h0 = self.z_to_h0(z).view(B, self.num_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
         c0 = self.z_to_c0(z).view(B, self.num_layers, self.hidden_dim).permute(1, 0, 2).contiguous()
@@ -293,19 +245,13 @@ class LSTMDecoder(nn.Module):
         h, c = h0, c0
         for _ in range(seq_len):
             out, (h, c) = self.lstm(inp, (h, c))
-            step = self.output_proj(out)   # (B, 1, event_dim)
+            step = self.output_proj(out)
             outputs.append(step)
             inp = step.detach()
-        return torch.cat(outputs, dim=1)   # (B, seq_len, event_dim)
+        return torch.cat(outputs, dim=1)
 
 
 class LSTMVAE(nn.Module):
-    """
-    Full LSTM-VAE.  Encodes σ_t → z_t, decodes z_t → σ̂_t.
-
-    q_φ(z_t | σ_t) = N(μ_t, σ_t²)
-    Reparameterisation: z_t = μ_t + σ_t ⊙ ε, ε ~ N(0, I)
-    """
 
     def __init__(
         self,
@@ -315,7 +261,7 @@ class LSTMVAE(nn.Module):
         num_layers: int = 2,
         beta: float = 1.0,
         gamma: float = 0.0,
-        gamma_conf: float = 0.0, # REVISED+_pres implementation so gamma_conf for DIFF-ERO loss is forced to 0
+        gamma_conf: float = 0.5,
         lambda_tdc: float = 0.0,
         lambda_res: float = 0.0,
     ):
@@ -323,9 +269,10 @@ class LSTMVAE(nn.Module):
         self.latent_dim = latent_dim
         self.beta = beta
         self.gamma = gamma
-        # REVISED+_pres
+
         self.lambda_tdc = float(lambda_tdc)
         self.declare_constraints = None
+
         self.register_buffer("lambda_res_tensor", torch.tensor(float(lambda_res)))
         self._lambda_res_cached: float = float(lambda_res)
 
@@ -353,7 +300,7 @@ class LSTMVAE(nn.Module):
     def set_resource_lambda(self, lambda_res: float) -> None:
         self.lambda_res_tensor.fill_(lambda_res)
         self._lambda_res_cached = float(lambda_res)
-    
+
     @property
     def gamma_conf(self) -> float:
         return self._gamma_conf_cached
@@ -362,31 +309,26 @@ class LSTMVAE(nn.Module):
         self.declare_constraints = constraints
         self.lambda_tdc = float(lambda_tdc)
 
-    # Encoding 
+
     def encode(self, x: torch.Tensor, lengths: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns (μ, log σ²)."""
         return self.encoder(x, lengths)
 
     def reparameterise(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """z = μ + σ ⊙ ε,  ε ~ N(0, I)."""
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + std * eps
 
     def encode_trace(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        """Deterministic encode (uses μ only, no sampling). For inference."""
         mu, _ = self.encode(x, lengths)
         return mu
 
-    # Decoding 
+
     def decode(self, z: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """Teacher-forced decode. Returns (B, T, event_dim)."""
         return self.decoder(z, target)
 
     def decode_autoregressive(self, z: torch.Tensor, seq_len: int) -> torch.Tensor:
-        """Free-running decode from latent z."""
         return self.decoder.decode_from_z(z, seq_len, self.decoder.output_proj.out_features, z.device)
-    
+
     def build_decoder_input(
         self,
         x: torch.Tensor,
@@ -397,77 +339,47 @@ class LSTMVAE(nn.Module):
         k: float = 2.0,
         force_tf_prob: Optional[float] = None,
     ) -> torch.Tensor:
-        """
-        Scheduled-sampling decoder input, addressing exposure bias between
-        teacher-forced training and autoregressive inference (the gap
-        measured in eval_vae_reconstruction.py between the two decode modes).
- 
-        For a fraction of (batch, timestep) positions, replace the
-        ground-truth shifted input with the model's OWN previous-step
-        prediction instead — the same kind of input the decoder actually
-        sees during decode_autoregressive() / rigid_invariant_decoder at
-        explanation time.
- 
-        Schedule: teacher_forcing_prob stays at ~1.0 for the first
-        `warmup_frac` of training (so the VAE first learns a reasonable
-        latent space before being forced to condition on its own noisy
-        early predictions), then decays via an inverse-sigmoid curve over
-        the remaining epochs.
- 
-        x:            (B, T, event_dim) ground-truth trace
-        z:            (B, latent_dim)   already-sampled latent code — reused
-                       here for the "peek" pass, so no extra encode() call
-        epoch:        current training epoch (0-indexed)
-        total_epochs: total planned epochs for this training run
-        force_tf_prob: if set, bypasses the epoch-based inverse-sigmoid decay
-                   entirely and uses this fixed value instead. Used only
-                   for diagnostic sweeps (e.g. eval_exposure_bias_ero.py) —
-                   never during actual training, where the schedule must
-                   still evolve with epoch as designed.
-        """
         if force_tf_prob is not None:
             teacher_forcing_prob = force_tf_prob
         else:
             warmup_epochs = int(warmup_frac * total_epochs)
             eff_epoch = max(0, epoch - warmup_epochs)
             eff_total = max(1, total_epochs - warmup_epochs)
-    
+
             if epoch < warmup_epochs:
                 teacher_forcing_prob = 1.0
             else:
                 teacher_forcing_prob = k / (k + torch.exp(torch.tensor(eff_epoch / eff_total * k)))
                 teacher_forcing_prob = teacher_forcing_prob.item()
- 
+
         shifted_gt = torch.cat([torch.zeros_like(x[:, :1, :]), x[:, :-1, :]], dim=1)
- 
+
         if teacher_forcing_prob >= 0.999:
-            # Pure teacher forcing
             return shifted_gt, teacher_forcing_prob
- 
+
         with torch.no_grad():
             x_hat_peek = self.decode(z, shifted_gt)
         shifted_pred = torch.cat(
             [torch.zeros_like(x_hat_peek[:, :1, :]), x_hat_peek[:, :-1, :]], dim=1
         ).detach()
- 
+
         use_teacher = (
             torch.rand(x.size(0), x.size(1), 1, device=x.device) < teacher_forcing_prob
         )
         return torch.where(use_teacher, shifted_gt, shifted_pred), teacher_forcing_prob
 
-    # Loss 
+
     def elbo_loss(
         self,
         x: torch.Tensor,
         lengths: torch.Tensor,
         mask: torch.Tensor,
-        gamma_conf: Optional[float] = None, 
+        gamma_conf: Optional[float] = None,
         epoch: int = 0,
         total_epochs: int = 1,
         use_scheduled_sampling: bool = True,
         force_tf_prob: Optional[float] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        
         mu, logvar = self.encode(x, lengths)
         z = self.reparameterise(mu, logvar)
 
@@ -482,16 +394,13 @@ class LSTMVAE(nn.Module):
             teacher_forcing_prob = 1.0
         x_hat = self.decode(z, dec_input)
 
-        # Reconstruction loss (MSE over valid positions)
         recon = F.mse_loss(x_hat * mask.unsqueeze(-1), x * mask.unsqueeze(-1), reduction='sum')
         recon = recon / mask.sum()
 
-        # KL divergence
         kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
 
-        # Structural conformance penalty (DIFF-ERO) + resource feasibility
         if self._gamma_conf_cached > 0.0 and self.PM_ground_truth is not None:
-            act_seq = x[..., :self.PM_ground_truth.size(0)].argmax(dim=-1)  # ground-truth activity idx per step
+            act_seq = x[..., :self.PM_ground_truth.size(0)].argmax(dim=-1)
             ero_loss = diff_ero_loss(x_hat, act_seq, mask, self.PM_ground_truth.to(x_hat.device))
 
             if self.compat_matrix is not None:
@@ -502,7 +411,6 @@ class LSTMVAE(nn.Module):
         else:
             conf_loss = torch.tensor(0.0, device=x.device)
 
-        # REVISED+_pres baseline: Trace Declare constraint penalty + Resource - Activity feasibility penalty
         if self.lambda_tdc > 0.0 and self.declare_constraints:
             n_act = self.PM_ground_truth.size(0) if self.PM_ground_truth is not None else x.size(-1)
             tdc_loss = trace_declare_loss(x_hat, mask, self.declare_constraints, n_act)
@@ -514,7 +422,6 @@ class LSTMVAE(nn.Module):
         else:
             indep_res_loss = torch.tensor(0.0, device=x.device)
 
-        # Total loss
         loss = (
             recon
             + self.beta * kl

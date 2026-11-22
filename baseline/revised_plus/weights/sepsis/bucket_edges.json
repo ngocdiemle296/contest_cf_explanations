@@ -1,0 +1,13 @@
+{
+  "edges": [
+    5.0,
+    16.0,
+    172.0
+  ],
+  "labels": [
+    "bucket0_[5,16)",
+    "bucket1_[16,172)"
+  ],
+  "bucket_method": "quantile",
+  "n_buckets": 2
+}

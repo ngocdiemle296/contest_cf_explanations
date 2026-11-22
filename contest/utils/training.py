@@ -1,7 +1,3 @@
-"""
-Training for Offline Phase.
-"""
-
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
@@ -12,6 +8,7 @@ import logging
 from contest.data import event_log
 from contest.models.blackbox import CatBoostPPM, TransitionSystem
 from contest.models.vae import LSTMVAE
+from contest.models.transition import TransitionModel, RewardFunction
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +26,6 @@ def pad_sequence(seqs: List[np.ndarray], max_len: Optional[int] = None) -> Tuple
 
 
 class PPMTimeDataset(Dataset):
-    """
-    Builds (prefix, next-step target) samples for CatBoost black-box
-    training, one sample per (case, prefix_length t) pair.
-    """
     def __init__(self, cases: List[event_log.Case], min_prefix: int = 1):
         self.case_matrices: List[np.ndarray] = []
         self.index: List[Tuple[int, int, int, int, float]] = []
@@ -40,9 +33,9 @@ class PPMTimeDataset(Dataset):
         for case in cases:
             events = case.events
             if len(events) <= min_prefix:
-                continue   # no valid (prefix, target) pairs for this case
+                continue
 
-            full_mat = case.to_matrix().astype(np.float32) 
+            full_mat = case.to_matrix().astype(np.float32)
             self.case_matrices.append(full_mat)
             case_idx = len(self.case_matrices) - 1
 
@@ -62,15 +55,14 @@ class PPMTimeDataset(Dataset):
 
     def __getitem__(self, idx: int):
         case_idx, t, act_idx, res_idx, target_val = self.index[idx]
-        trace_mat = self.case_matrices[case_idx][:t]   # view, not a copy
+        trace_mat = self.case_matrices[case_idx][:t]
         return trace_mat, t, act_idx, res_idx, target_val
 
 
 class VAEDataset(Dataset):
-
     def __init__(self, cases: List[event_log.Case], min_len: int = 2):
         self.case_matrices: List[np.ndarray] = []
-        self.index: List[Tuple[int, int]] = []   # (case_matrix_idx, t)
+        self.index: List[Tuple[int, int]] = []
 
         for case in cases:
             if len(case.events) < min_len:
@@ -88,21 +80,20 @@ class VAEDataset(Dataset):
 
     def __getitem__(self, idx: int):
         case_idx, t = self.index[idx]
-        return self.case_matrices[case_idx][:t]   
+        return self.case_matrices[case_idx][:t]
 
 def vae_collate(batch):
     return pad_sequence(batch)
 
 
 class LengthBucketBatchSampler(torch.utils.data.Sampler):
-
     def __init__(self, dataset: "VAEDataset", batch_size: int, bucket_width: int = 5, seed: int = 0):
         self.batch_size = batch_size
         self.seed = seed
         self._epoch = 0
 
         lengths = [dataset.case_matrices[c].shape[0] if t is None else t
-                   for c, t in dataset.index]  
+                   for c, t in dataset.index]
         lengths = [t for _, t in dataset.index]
 
         buckets: Dict[int, List[int]] = {}
@@ -131,14 +122,62 @@ class LengthBucketBatchSampler(torch.utils.data.Sampler):
         return sum((len(b) + self.batch_size - 1) // self.batch_size for b in self.buckets)
 
 
+class TransitionDataset(Dataset):
+    def __init__(self, cases: List[event_log.Case], vae: LSTMVAE, device: torch.device):
+        self.triples = []
+        vae.eval()
+        with torch.no_grad():
+            for case in cases:
+                events = case.events
+                if len(events) < 2: continue
+                for t in range(1, len(events)):
+                    mat_t  = torch.tensor(case.to_matrix(t)[np.newaxis].astype(np.float32), device=device)
+                    mat_t1 = torch.tensor(case.to_matrix(t + 1)[np.newaxis].astype(np.float32), device=device)
+                    l_t    = torch.tensor([t], dtype=torch.long, device=device)
+                    l_t1   = torch.tensor([t+1], dtype=torch.long, device=device)
+
+                    z_t  = vae.encode_trace(mat_t,  l_t).cpu().numpy()[0]
+                    z_t1 = vae.encode_trace(mat_t1, l_t1).cpu().numpy()[0]
+                    act_idx = event_log.ACT2IDX.get(events[t].activity, 0)
+                    res_idx = event_log.RES2IDX.get(events[t].resource, 0)
+                    self.triples.append((z_t, act_idx, res_idx, z_t1))
+
+    def __len__(self) -> int: return len(self.triples)
+    def __getitem__(self, idx: int):
+        z_t, a, r, z_t1 = self.triples[idx]
+        return torch.tensor(z_t, dtype=torch.float32), torch.tensor(a, dtype=torch.long), torch.tensor(r, dtype=torch.long), torch.tensor(z_t1, dtype=torch.float32)
+
+
+class RewardDataset(Dataset):
+    def __init__(self, cases: List[event_log.Case], vae: LSTMVAE, device: torch.device):
+        self.samples = []
+        vae.eval()
+        with torch.no_grad():
+            for case in cases:
+                events = case.events
+                for t in range(1, len(events)):
+                    if events[t].activity == 'END': break
+                    remaining = events[t].remaining_time
+                    if remaining is None or np.isnan(remaining): continue
+
+                    mat = torch.tensor(case.to_matrix(t)[np.newaxis].astype(np.float32), device=device)
+                    l   = torch.tensor([t], dtype=torch.long, device=device)
+                    z   = vae.encode_trace(mat, l).cpu().numpy()[0]
+                    a   = event_log.ACT2IDX.get(events[t].activity, 0)
+                    r   = event_log.RES2IDX.get(events[t].resource, 0)
+                    self.samples.append((z, a, r, -float(remaining)))
+
+    def __len__(self): return len(self.samples)
+    def __getitem__(self, idx):
+        z, a, r, rw = self.samples[idx]
+        return torch.tensor(z, dtype=torch.float32), torch.tensor(a, dtype=torch.long), torch.tensor(r, dtype=torch.long), torch.tensor(rw, dtype=torch.float32)
+
+
 def cross_validate_black_box(cases: List[event_log.Case], k: int = 5,
                               depth: int = 6, learning_rate: float = 0.1,
                               iterations: int = 300, variance_power: float = 1.5,
                               catboost_thread_count: Optional[int] = 4,
                               seed: int = 42) -> Dict[str, float]:
-    """
-    Case-level k-fold CV for the black-box time predictor. 
-    """
     max_trace_len = max((len(c.events) for c in cases), default=1)
     ts = TransitionSystem.from_cases(cases)
     model_builder = CatBoostPPM(transition_system=ts, max_trace_len=max_trace_len,
@@ -206,9 +245,8 @@ def train_black_box(cases: List[event_log.Case], device: torch.device, n_epochs:
                      depth: int = 6, learning_rate: float = 0.1,
                      iterations: int = 300, variance_power: float = 1.5,
                      precomputed_cv_summary: Optional[Dict] = None) -> CatBoostPPM:
-
     logger.info("=== Training BlackBox PPM (CatBoost) ===")
-    
+
     if event_log.EVENT_DIM == 0 or len(event_log.ACTIVITIES) == 0:
         all_acts = sorted(list(set(ev.activity for c in cases for ev in c.events)))
         all_ress = sorted(list(set(ev.resource for c in cases for ev in c.events)))
@@ -264,13 +302,10 @@ def train_black_box(cases: List[event_log.Case], device: torch.device, n_epochs:
 
 def train_vae(cases, device, latent_dim=32, hidden_dim=128, beta=1.0,
               n_epochs=20, batch_size=64, lr=1e-3,
-              PM_ground_truth: Optional[torch.Tensor] = None, 
-              gamma_conf: float = 0.5,
-              use_scheduled_sampling=True, 
-              use_length_bucketing: bool = False) -> LSTMVAE:
+              PM_ground_truth: Optional[torch.Tensor] = None, gamma_conf: float = 0.5,
+              use_scheduled_sampling=True, use_length_bucketing: bool = False) -> LSTMVAE:
     logger.info("=== Training LSTM-VAE ===")
     dataset = VAEDataset(cases)
-
     use_workers = device.type == "cuda"
     if use_length_bucketing:
         batch_sampler = LengthBucketBatchSampler(dataset, batch_size=batch_size)
@@ -295,21 +330,20 @@ def train_vae(cases, device, latent_dim=32, hidden_dim=128, beta=1.0,
     true_event_dim = cases[0].to_matrix(len(cases[0].events)).shape[1]
     model = LSTMVAE(event_dim=true_event_dim, hidden_dim=hidden_dim,
                      latent_dim=latent_dim, gamma_conf=gamma_conf).to(device)
-    
+
     if PM_ground_truth is not None:
         model.set_ground_truth_transitions(PM_ground_truth.to(device), gamma_conf)
         logger.info(f"  DIFF-ERO structural conformance active (γ={gamma_conf})")
     else:
         logger.info("  No conformance regularisation")
-        
+
     opt   = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_epochs)
 
     for epoch in range(n_epochs):
         if batch_sampler is not None:
-            batch_sampler.set_epoch(epoch)   
+            batch_sampler.set_epoch(epoch)
         model.train()
-        
         total_loss  = torch.zeros((), device=device)
         total_recon = torch.zeros((), device=device)
         total_kl    = torch.zeros((), device=device)
@@ -332,4 +366,44 @@ def train_vae(cases, device, latent_dim=32, hidden_dim=128, beta=1.0,
             logger.info(f"  [sched-sampling] epoch={epoch} teacher_forcing_prob≈{tf_prob:.3f}")
         sched.step()
         logger.info(f"  Epoch {epoch+1:02d}/{n_epochs} | Loss={total_loss.item()/n:.4f} | Recon={total_recon.item()/n:.4f} | ERO={total_ero.item()/n:.4f}")
+    return model
+
+
+def train_transition_model(cases: List[event_log.Case], vae: LSTMVAE, device: torch.device, latent_dim: int = 32, hidden_dim: int = 128, n_epochs: int = 20, batch_size: int = 128, lr: float = 1e-3) -> TransitionModel:
+    logger.info("=== Training Transition Model ===")
+    dataset = TransitionDataset(cases, vae, device)
+    loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    model = TransitionModel(latent_dim=latent_dim, n_activities=len(event_log.ACTIVITIES), n_resources=len(event_log.RESOURCES), hidden_dim=hidden_dim).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_epochs)
+
+    for epoch in range(n_epochs):
+        model.train()
+        total_loss, n = 0.0, 0
+        for z_t, act, res, z_t1 in loader:
+            z_t, act, res, z_t1 = z_t.to(device), act.to(device), res.to(device), z_t1.to(device)
+            loss = model.transition_loss(z_t, act, res, z_t1)
+            opt.zero_grad(); loss.backward(); opt.step()
+            total_loss += loss.item() * z_t.size(0)
+            n += z_t.size(0)
+        sched.step()
+    return model
+
+
+def train_reward_function(cases: List[event_log.Case], vae: LSTMVAE, device: torch.device, latent_dim: int = 32, n_epochs: int = 15, batch_size: int = 128, lr: float = 1e-3) -> RewardFunction:
+    logger.info("=== Training Reward Function ===")
+    dataset = RewardDataset(cases, vae, device)
+    loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    model = RewardFunction(latent_dim=latent_dim, n_activities=len(event_log.ACTIVITIES), n_resources=len(event_log.RESOURCES)).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(n_epochs):
+        model.train()
+        for z, act, res, reward in loader:
+            z, act, res, reward = z.to(device), act.to(device), res.to(device), reward.to(device)
+            pred = model(z, act, res)
+            loss = F.mse_loss(pred, reward)
+            opt.zero_grad(); loss.backward(); opt.step()
     return model

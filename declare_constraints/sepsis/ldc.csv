@@ -1,0 +1,267 @@
+label_activity,template,a,b
+Admission IC,co_existence,ER Registration,ER Triage
+Admission IC,exactly,ER Registration,
+Admission IC,exactly,ER Triage,
+Admission IC,not_succession,ER Triage,ER Registration
+Admission IC,precedence,ER Registration,ER Triage
+Admission IC,response,ER Registration,ER Triage
+Admission IC,succession,ER Registration,ER Triage
+Admission NC,co_existence,ER Registration,ER Triage
+Admission NC,exactly,ER Registration,
+Admission NC,exactly,ER Triage,
+ER Sepsis Triage,exactly,ER Registration,
+ER Triage,exactly,ER Registration,
+IV Antibiotics,exactly,ER Sepsis Triage,
+Release A,co_existence,Admission NC,ER Registration
+Release A,co_existence,Admission NC,ER Sepsis Triage
+Release A,co_existence,Admission NC,ER Triage
+Release A,co_existence,ER Registration,ER Sepsis Triage
+Release A,co_existence,ER Registration,ER Triage
+Release A,co_existence,ER Sepsis Triage,ER Triage
+Release A,exactly,ER Registration,
+Release A,exactly,ER Sepsis Triage,
+Release A,not_succession,Admission NC,ER Registration
+Release A,precedence,ER Registration,Admission NC
+Release A,precedence,ER Triage,Admission NC
+Release A,response,ER Registration,Admission NC
+Release A,response,ER Sepsis Triage,Admission NC
+Release A,succession,ER Registration,Admission NC
+Release B,co_existence,CRP,ER Registration
+Release B,co_existence,CRP,ER Sepsis Triage
+Release B,co_existence,CRP,ER Triage
+Release B,co_existence,CRP,Leucocytes
+Release B,co_existence,ER Registration,ER Sepsis Triage
+Release B,co_existence,ER Registration,ER Triage
+Release B,co_existence,ER Registration,Leucocytes
+Release B,co_existence,ER Sepsis Triage,ER Triage
+Release B,co_existence,ER Sepsis Triage,Leucocytes
+Release B,co_existence,ER Triage,Leucocytes
+Release B,exactly,ER Registration,
+Release B,exactly,ER Sepsis Triage,
+Release B,exactly,ER Triage,
+Release B,not_succession,ER Sepsis Triage,ER Registration
+Release B,not_succession,ER Triage,ER Registration
+Release B,precedence,ER Registration,ER Sepsis Triage
+Release B,precedence,ER Registration,ER Triage
+Release B,response,ER Registration,CRP
+Release B,response,ER Registration,ER Sepsis Triage
+Release B,response,ER Registration,ER Triage
+Release B,response,ER Registration,Leucocytes
+Release B,response,ER Triage,CRP
+Release B,response,ER Triage,Leucocytes
+Release B,succession,ER Registration,ER Sepsis Triage
+Release B,succession,ER Registration,ER Triage
+Release C,co_existence,Admission NC,CRP
+Release C,co_existence,Admission NC,ER Registration
+Release C,co_existence,Admission NC,ER Sepsis Triage
+Release C,co_existence,Admission NC,ER Triage
+Release C,co_existence,Admission NC,Leucocytes
+Release C,co_existence,CRP,ER Registration
+Release C,co_existence,CRP,ER Sepsis Triage
+Release C,co_existence,CRP,ER Triage
+Release C,co_existence,CRP,Leucocytes
+Release C,co_existence,ER Registration,ER Sepsis Triage
+Release C,co_existence,ER Registration,ER Triage
+Release C,co_existence,ER Registration,Leucocytes
+Release C,co_existence,ER Sepsis Triage,ER Triage
+Release C,co_existence,ER Sepsis Triage,Leucocytes
+Release C,co_existence,ER Triage,Leucocytes
+Release C,exactly,ER Registration,
+Release C,exactly,ER Sepsis Triage,
+Release C,exactly,ER Triage,
+Release C,not_succession,Admission NC,ER Registration
+Release C,not_succession,Admission NC,ER Sepsis Triage
+Release C,not_succession,Admission NC,ER Triage
+Release C,not_succession,ER Sepsis Triage,ER Registration
+Release C,not_succession,ER Sepsis Triage,ER Triage
+Release C,precedence,CRP,Admission NC
+Release C,precedence,ER Registration,Admission NC
+Release C,precedence,ER Registration,ER Sepsis Triage
+Release C,precedence,ER Sepsis Triage,Admission NC
+Release C,precedence,ER Triage,Admission NC
+Release C,precedence,ER Triage,ER Sepsis Triage
+Release C,precedence,Leucocytes,Admission NC
+Release C,response,ER Registration,Admission NC
+Release C,response,ER Registration,CRP
+Release C,response,ER Registration,ER Sepsis Triage
+Release C,response,ER Registration,Leucocytes
+Release C,response,ER Sepsis Triage,Admission NC
+Release C,response,ER Sepsis Triage,CRP
+Release C,response,ER Sepsis Triage,Leucocytes
+Release C,response,ER Triage,Admission NC
+Release C,response,ER Triage,CRP
+Release C,response,ER Triage,ER Sepsis Triage
+Release C,response,ER Triage,Leucocytes
+Release C,succession,ER Registration,Admission NC
+Release C,succession,ER Registration,ER Sepsis Triage
+Release C,succession,ER Sepsis Triage,Admission NC
+Release C,succession,ER Triage,Admission NC
+Release C,succession,ER Triage,ER Sepsis Triage
+Release D,chain_precedence,ER Registration,ER Triage
+Release D,chain_response,ER Registration,ER Triage
+Release D,chain_succession,ER Registration,ER Triage
+Release D,co_existence,Admission NC,CRP
+Release D,co_existence,Admission NC,ER Registration
+Release D,co_existence,Admission NC,ER Sepsis Triage
+Release D,co_existence,Admission NC,ER Triage
+Release D,co_existence,Admission NC,Leucocytes
+Release D,co_existence,CRP,ER Registration
+Release D,co_existence,CRP,ER Sepsis Triage
+Release D,co_existence,CRP,ER Triage
+Release D,co_existence,CRP,Leucocytes
+Release D,co_existence,ER Registration,ER Sepsis Triage
+Release D,co_existence,ER Registration,ER Triage
+Release D,co_existence,ER Registration,Leucocytes
+Release D,co_existence,ER Sepsis Triage,ER Triage
+Release D,co_existence,ER Sepsis Triage,Leucocytes
+Release D,co_existence,ER Triage,Leucocytes
+Release D,exactly,ER Registration,
+Release D,exactly,ER Sepsis Triage,
+Release D,exactly,ER Triage,
+Release D,init,ER Registration,
+Release D,not_succession,Admission NC,ER Registration
+Release D,not_succession,Admission NC,ER Sepsis Triage
+Release D,not_succession,Admission NC,ER Triage
+Release D,not_succession,CRP,ER Registration
+Release D,not_succession,CRP,ER Triage
+Release D,not_succession,ER Sepsis Triage,ER Registration
+Release D,not_succession,ER Sepsis Triage,ER Triage
+Release D,not_succession,ER Triage,ER Registration
+Release D,not_succession,Leucocytes,ER Registration
+Release D,not_succession,Leucocytes,ER Triage
+Release D,precedence,CRP,Admission NC
+Release D,precedence,ER Registration,Admission NC
+Release D,precedence,ER Registration,CRP
+Release D,precedence,ER Registration,ER Sepsis Triage
+Release D,precedence,ER Registration,ER Triage
+Release D,precedence,ER Registration,Leucocytes
+Release D,precedence,ER Sepsis Triage,Admission NC
+Release D,precedence,ER Triage,Admission NC
+Release D,precedence,ER Triage,CRP
+Release D,precedence,ER Triage,ER Sepsis Triage
+Release D,precedence,ER Triage,Leucocytes
+Release D,precedence,Leucocytes,Admission NC
+Release D,response,Admission NC,CRP
+Release D,response,ER Registration,Admission NC
+Release D,response,ER Registration,CRP
+Release D,response,ER Registration,ER Sepsis Triage
+Release D,response,ER Registration,ER Triage
+Release D,response,ER Registration,Leucocytes
+Release D,response,ER Sepsis Triage,Admission NC
+Release D,response,ER Sepsis Triage,CRP
+Release D,response,ER Sepsis Triage,Leucocytes
+Release D,response,ER Triage,Admission NC
+Release D,response,ER Triage,CRP
+Release D,response,ER Triage,ER Sepsis Triage
+Release D,response,ER Triage,Leucocytes
+Release D,succession,ER Registration,Admission NC
+Release D,succession,ER Registration,CRP
+Release D,succession,ER Registration,ER Sepsis Triage
+Release D,succession,ER Registration,ER Triage
+Release D,succession,ER Registration,Leucocytes
+Release D,succession,ER Sepsis Triage,Admission NC
+Release D,succession,ER Triage,Admission NC
+Release D,succession,ER Triage,CRP
+Release D,succession,ER Triage,ER Sepsis Triage
+Release D,succession,ER Triage,Leucocytes
+Release E,chain_precedence,ER Registration,ER Triage
+Release E,chain_precedence,ER Triage,ER Sepsis Triage
+Release E,chain_response,ER Registration,ER Triage
+Release E,chain_response,ER Triage,ER Sepsis Triage
+Release E,chain_succession,ER Registration,ER Triage
+Release E,chain_succession,ER Triage,ER Sepsis Triage
+Release E,co_existence,Admission NC,CRP
+Release E,co_existence,Admission NC,ER Registration
+Release E,co_existence,Admission NC,ER Sepsis Triage
+Release E,co_existence,Admission NC,ER Triage
+Release E,co_existence,Admission NC,Leucocytes
+Release E,co_existence,CRP,ER Registration
+Release E,co_existence,CRP,ER Sepsis Triage
+Release E,co_existence,CRP,ER Triage
+Release E,co_existence,CRP,Leucocytes
+Release E,co_existence,ER Registration,ER Sepsis Triage
+Release E,co_existence,ER Registration,ER Triage
+Release E,co_existence,ER Registration,Leucocytes
+Release E,co_existence,ER Sepsis Triage,ER Triage
+Release E,co_existence,ER Sepsis Triage,Leucocytes
+Release E,co_existence,ER Triage,Leucocytes
+Release E,exactly,ER Registration,
+Release E,exactly,ER Sepsis Triage,
+Release E,exactly,ER Triage,
+Release E,existence3,Leucocytes,
+Release E,init,ER Registration,
+Release E,not_succession,Admission NC,ER Registration
+Release E,not_succession,Admission NC,ER Sepsis Triage
+Release E,not_succession,Admission NC,ER Triage
+Release E,not_succession,CRP,ER Registration
+Release E,not_succession,CRP,ER Sepsis Triage
+Release E,not_succession,CRP,ER Triage
+Release E,not_succession,ER Sepsis Triage,ER Registration
+Release E,not_succession,ER Sepsis Triage,ER Triage
+Release E,not_succession,ER Triage,ER Registration
+Release E,not_succession,Leucocytes,ER Registration
+Release E,not_succession,Leucocytes,ER Sepsis Triage
+Release E,not_succession,Leucocytes,ER Triage
+Release E,precedence,CRP,Admission NC
+Release E,precedence,ER Registration,Admission NC
+Release E,precedence,ER Registration,CRP
+Release E,precedence,ER Registration,ER Sepsis Triage
+Release E,precedence,ER Registration,ER Triage
+Release E,precedence,ER Registration,Leucocytes
+Release E,precedence,ER Sepsis Triage,Admission NC
+Release E,precedence,ER Sepsis Triage,CRP
+Release E,precedence,ER Sepsis Triage,Leucocytes
+Release E,precedence,ER Triage,Admission NC
+Release E,precedence,ER Triage,CRP
+Release E,precedence,ER Triage,ER Sepsis Triage
+Release E,precedence,ER Triage,Leucocytes
+Release E,precedence,Leucocytes,Admission NC
+Release E,response,Admission NC,CRP
+Release E,response,Admission NC,Leucocytes
+Release E,response,ER Registration,Admission NC
+Release E,response,ER Registration,CRP
+Release E,response,ER Registration,ER Sepsis Triage
+Release E,response,ER Registration,ER Triage
+Release E,response,ER Registration,Leucocytes
+Release E,response,ER Sepsis Triage,Admission NC
+Release E,response,ER Sepsis Triage,CRP
+Release E,response,ER Sepsis Triage,Leucocytes
+Release E,response,ER Triage,Admission NC
+Release E,response,ER Triage,CRP
+Release E,response,ER Triage,ER Sepsis Triage
+Release E,response,ER Triage,Leucocytes
+Release E,succession,ER Registration,Admission NC
+Release E,succession,ER Registration,CRP
+Release E,succession,ER Registration,ER Sepsis Triage
+Release E,succession,ER Registration,ER Triage
+Release E,succession,ER Registration,Leucocytes
+Release E,succession,ER Sepsis Triage,Admission NC
+Release E,succession,ER Sepsis Triage,CRP
+Release E,succession,ER Sepsis Triage,Leucocytes
+Release E,succession,ER Triage,Admission NC
+Release E,succession,ER Triage,CRP
+Release E,succession,ER Triage,ER Sepsis Triage
+Release E,succession,ER Triage,Leucocytes
+Return ER,co_existence,Admission NC,CRP
+Return ER,co_existence,Admission NC,ER Registration
+Return ER,co_existence,Admission NC,ER Sepsis Triage
+Return ER,co_existence,Admission NC,ER Triage
+Return ER,co_existence,CRP,ER Registration
+Return ER,co_existence,CRP,ER Sepsis Triage
+Return ER,co_existence,CRP,ER Triage
+Return ER,co_existence,ER Registration,ER Sepsis Triage
+Return ER,co_existence,ER Registration,ER Triage
+Return ER,co_existence,ER Sepsis Triage,ER Triage
+Return ER,exactly,ER Registration,
+Return ER,exactly,ER Sepsis Triage,
+Return ER,not_succession,Admission NC,ER Registration
+Return ER,not_succession,Admission NC,ER Sepsis Triage
+Return ER,precedence,CRP,Admission NC
+Return ER,precedence,ER Registration,Admission NC
+Return ER,precedence,ER Sepsis Triage,Admission NC
+Return ER,precedence,ER Triage,Admission NC
+Return ER,response,ER Registration,Admission NC
+Return ER,response,ER Registration,CRP
+Return ER,response,ER Sepsis Triage,Admission NC
+Return ER,succession,ER Registration,Admission NC
+Return ER,succession,ER Sepsis Triage,Admission NC

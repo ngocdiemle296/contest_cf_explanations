@@ -1,12 +1,7 @@
-"""
-Black-box Oracle Module
-Training a CatBoost regressor to predict a running case's remaining execution time, returning the (activity, resource) pair with the lowest predicted time.
-"""
-
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Tuple, Optional, Dict, List, Callable
+from typing import Tuple, Optional, Dict, List, Callable, Iterable
 
 import torch
 import numpy as np
@@ -14,15 +9,17 @@ import numpy as np
 from contest.data import event_log
 
 
-# Joint action space  A^c = A × R
 def joint_actions() -> List[Tuple[str, str]]:
     return [(a, r) for a in event_log.ACTIVITIES for r in event_log.RESOURCES]
+
 
 def n_joint_actions() -> int:
     return len(event_log.ACTIVITIES) * len(event_log.RESOURCES)
 
+
 def joint_action_idx(activity: str, resource: str) -> int:
     return event_log.ACT2IDX[activity] * len(event_log.RESOURCES) + event_log.RES2IDX[resource]
+
 
 def idx_to_joint_action(idx: int) -> Tuple[str, str]:
     if not event_log.RESOURCES:
@@ -32,23 +29,12 @@ def idx_to_joint_action(idx: int) -> Tuple[str, str]:
     return (event_log.IDX2ACT.get(act_idx, event_log.ACTIVITIES[0]),
             event_log.IDX2RES.get(res_idx, event_log.RESOURCES[0]))
 
-# Synthetic / boundary activities that exist only to mark "this is the
-# beginning/ending of a case" in the event log.
+
 NON_RECOMMENDABLE_ACTIVITIES = {"START", "END"}
 NON_RECOMMENDABLE_RESOURCES = {"System"}
 
+
 def non_recommendable_action_indices() -> List[int]:
-    """
-    Joint-action indices that should never be selectable as a
-    recommendation or counterfactual target. Two independent conditions,
-    each sufficient on its own:
-      (a) activity is a synthetic boundary marker (START/END) — not a
-          real process step, regardless of resource.
-      (b) resource is System (or any other automated/non-human resource
-          in NON_RECOMMENDABLE_RESOURCES) — not something a business
-          stakeholder can actually be told to assign, regardless of
-          activity.
-    """
     bad_act_idxs = {
         event_log.ACT2IDX[a] for a in NON_RECOMMENDABLE_ACTIVITIES if a in event_log.ACT2IDX
     }
@@ -66,30 +52,20 @@ def non_recommendable_action_indices() -> List[int]:
 
 @lru_cache(maxsize=None)
 def feasible_joint_action_indices(min_observations: int = 1) -> torch.Tensor:
-    """
-    Restricted output space for LocalSurrogate.
-    n_joint_actions() = |ACTIVITIES| x |RESOURCES| counts every possible
-    combination, including thousands that never occur in the data (e.g. an
-    intake-only resource paired with a validation activity).
-    """
     counts = getattr(event_log, "RESOURCE_ACTIVITY_COUNTS", None)
     if counts is None:
         raise RuntimeError(
             "event_log.RESOURCE_ACTIVITY_COUNTS is not built yet. Call "
             "event_log.build_resource_activity_matrix(cases, ...) before "
-            "constructing a LocalSurrogate with a restricted output space "
-            "(this also requires the RESOURCE_ACTIVITY_COUNTS-caching patch "
-            "to build_resource_activity_matrix)."
+            "constructing a LocalSurrogate with a restricted output space."
         )
-    mat = torch.as_tensor(counts) >= min_observations  
+    mat = torch.as_tensor(counts) >= min_observations
     n_act = len(event_log.ACTIVITIES)
     n_res = len(event_log.RESOURCES)
 
     if mat.shape == (n_act, n_res):
-        pass  # already matching (activity, resource) format 
+        pass
     elif mat.shape == (n_res, n_act):
-        # Observed orientation in practice: (resource, activity). Transpose
-        # so downstream flattening can assume (activity, resource) either way.
         mat = mat.T
     else:
         raise ValueError(
@@ -100,7 +76,7 @@ def feasible_joint_action_indices(min_observations: int = 1) -> torch.Tensor:
             f"event_log.build_resource_activity_matrix() constructs this matrix."
         )
 
-    flat_idx = mat.reshape(-1).nonzero(as_tuple=False).squeeze(-1)  # act_idx*n_res+res_idx
+    flat_idx = mat.reshape(-1).nonzero(as_tuple=False).squeeze(-1)
     bad = set(non_recommendable_action_indices())
     feasible = sorted(int(i) for i in flat_idx.tolist() if int(i) not in bad)
 
@@ -112,9 +88,7 @@ def feasible_joint_action_indices(min_observations: int = 1) -> torch.Tensor:
     return torch.as_tensor(feasible, dtype=torch.long)
 
 
-# Transition system (feasible next activities + resources from event log)
 class TransitionSystem:
-    """Encodes feasible next activities and resources from the event log."""
 
     def __init__(self, history_len: int = 5) -> None:
         self.next_acts: Dict[str, List[str]] = {}
@@ -130,7 +104,6 @@ class TransitionSystem:
         for case in cases:
             evs = case.events
             for i, ev in enumerate(evs):
-                # Tracking which resources can do which activities globally
                 resources_by_act_set.setdefault(ev.activity, set()).add(ev.resource)
 
                 if i + 1 < len(evs):
@@ -149,21 +122,16 @@ class TransitionSystem:
         return ts
 
     def feasible_pairs(self, history_activities: List[str]) -> List[Tuple[str, str]]:
-            """
-            Accepts a list of past activities (any length), truncates to the last 5 (window_size), 
-            and extracts the valid (activity, resource) joint actions.
-            """
-            
-            recent_history = tuple(history_activities[-self.history_len:]) # Ensure we only look at the most recent 5 events
-            
+            recent_history = tuple(history_activities[-self.history_len:])
+
             next_acts = self.next_acts.get(recent_history)
-            
+
             backoff_len = len(recent_history) - 1
             while not next_acts and backoff_len > 0:
                 shortened_history = recent_history[-backoff_len:]
                 next_acts = self.next_acts.get(shortened_history)
                 backoff_len -= 1
-                
+
             if not next_acts:
                 next_acts = [
                     a for a in self.resources_by_act.keys()
@@ -177,13 +145,12 @@ class TransitionSystem:
                     pairs.append((act, res))
             return pairs
 
+
     def to_dict(self) -> Dict:
-        """Converts tuple keys to delimited strings so JSON can serialize them."""
-        # Join tuple elements with a comma, e.g., ('A', 'B') -> "A,B"
         stringified_next_acts = {
             ",".join(k): v for k, v in self.next_acts.items()
         }
-        
+
         return {
             "next_acts": stringified_next_acts,
             "resources_by_act": self.resources_by_act,
@@ -191,30 +158,21 @@ class TransitionSystem:
 
     @staticmethod
     def from_dict(data: Dict, history_len: int = 5) -> "TransitionSystem":
-        """Reconstructs the system, restoring string keys back into tuples."""
         ts = TransitionSystem(history_len=history_len)
-        
+
         raw_next_acts = data.get("next_acts", {})
-        
-        # Split the comma-separated strings back into structural tuples
+
         ts.next_acts = {
             tuple(k.split(",")): list(v) for k, v in raw_next_acts.items()
         }
-        
+
         ts.resources_by_act = {
             k: list(v) for k, v in data.get("resources_by_act", {}).items()
         }
         return ts
 
 
-# Black-box model (CatBoost regressor — opaque to the XAI framework)
-
 class CatBoostPPM:
-    """
-    Opaque CatBoost-based recommender.
-    Trained to predict execution time for (σ_t, a^c_{t+1}).
-    Recommendation = feasible (activity, resource) pair with smallest predicted time.
-    """
 
     def __init__(self, transition_system: TransitionSystem, max_trace_len: int = 20,
                  thread_count: Optional[int] = 4,
@@ -287,14 +245,27 @@ class CatBoostPPM:
         activity: str,
         resource: str,
     ) -> float:
-        """
-        KPI lookup for one specific (activity, resource) pair.
-        """
         feat = self._build_feature_vector(
             trace_mat, length, event_log.ACT2IDX[activity], event_log.RES2IDX[resource]
         )
         time_pred = self.predict_time(feat[np.newaxis, :])
         return float(time_pred[0])
+
+    def candidate_pairs(self, trace_mat: np.ndarray, length: int) -> List[Tuple[str, str]]:
+        history_acts = []
+        start_lookback = max(0, length - self.max_trace_len)
+        for step_idx in range(start_lookback, length):
+            event_vec = trace_mat[step_idx]
+            act_idx = int(np.argmax(event_vec[:len(event_log.ACTIVITIES)]))
+            history_acts.append(event_log.IDX2ACT.get(act_idx, event_log.ACTIVITIES[0]))
+
+        pairs = self.transition_system.feasible_pairs(history_acts)
+        if not pairs:
+            pairs = [
+                (a, r) for (a, r) in joint_actions()
+                if a not in NON_RECOMMENDABLE_ACTIVITIES
+            ]
+        return pairs
 
     def recommend(
         self,
@@ -302,19 +273,7 @@ class CatBoostPPM:
         length: int,
         return_time: bool = False,
     ) -> Tuple[str, str]:
-        history_acts = []
-        start_lookback = max(0, length - self.max_trace_len) 
-        for step_idx in range(start_lookback, length):
-            event_vec = trace_mat[step_idx]
-            act_idx = int(np.argmax(event_vec[:len(event_log.ACTIVITIES)]))
-            history_acts.append(event_log.IDX2ACT.get(act_idx, event_log.ACTIVITIES[0]))
-            
-        pairs = self.transition_system.feasible_pairs(history_acts)
-        if not pairs:
-            pairs = [
-                (a, r) for (a, r) in joint_actions()
-                if a not in NON_RECOMMENDABLE_ACTIVITIES
-            ]
+        pairs = self.candidate_pairs(trace_mat, length)
 
         feat_list = []
         for act, res in pairs:
@@ -407,13 +366,7 @@ class CatBoostPPM:
         return bb
 
 
-# Latent-space oracle wrapper (used by surrogate & CF search)
-
 class LatentOracle:
-    """
-    Wraps the black-box PPM so it can be queried with a latent vector z.
-    decode_fn: z → σ matrix (event sequence)
-    """
 
     def __init__(
         self,
@@ -428,15 +381,11 @@ class LatentOracle:
         self.device     = device
 
     def __call__(self, z: torch.Tensor) -> torch.Tensor:
-        """
-        z: (B, latent_dim)  → action_idx (B,) int64
-        Decodes to sequence, queries black-box.
-        """
         if z.dim() == 1:
             z = z.unsqueeze(0)
         B = z.size(0)
         with torch.no_grad():
-            seq = self.decode_fn(z)   # (B, T, event_dim)
+            seq = self.decode_fn(z)
             lengths = torch.full((B,), seq.size(1), dtype=torch.long)
             preds = self.black_box.predict_idx_batch(seq, lengths)
         return preds
@@ -465,15 +414,15 @@ class TargetedLatentOracle:
         self.orig_act, self.orig_res = idx_to_joint_action(original_action_idx)
         self.last_t_target: Optional[float] = None
         self.last_t_orig: Optional[float] = None
-        self.last_margin: Optional[float] = None      
-        self.last_flipped: Optional[bool] = None       
+        self.last_margin: Optional[float] = None
+        self.last_flipped: Optional[bool] = None
 
     def __call__(self, z: torch.Tensor) -> torch.Tensor:
         if z.dim() == 1:
             z = z.unsqueeze(0)
         B = z.size(0)
         with torch.no_grad():
-            seq = self.decode_fn(z)  # (B, T, event_dim) 
+            seq = self.decode_fn(z)
             out = []
             for i in range(B):
                 trace_mat = seq[i].cpu().numpy()
@@ -496,14 +445,71 @@ class TargetedLatentOracle:
             return torch.tensor(out, dtype=torch.long)
 
 
+class FaithfulLatentOracle(LatentOracle):
 
-# Explanation decoder
+    def __init__(
+        self,
+        black_box: CatBoostPPM,
+        history_fn: Callable[[torch.Tensor], torch.Tensor],
+        seq_len: int,
+        device: torch.device,
+        original_action_idx: int,
+    ):
+        super().__init__(black_box, history_fn, seq_len, device)
+        self.original_action_idx = original_action_idx
+        self.orig_act, self.orig_res = idx_to_joint_action(original_action_idx)
+        self.last_rec_act: Optional[str] = None
+        self.last_rec_res: Optional[str] = None
+        self.last_t_rec: Optional[float] = None
+        self._last_trace: Optional[np.ndarray] = None
+        self._last_len: Optional[int] = None
+
+    def __call__(self, z: torch.Tensor) -> torch.Tensor:
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        with torch.no_grad():
+            seq = self.decode_fn(z)
+            out = []
+            for i in range(seq.size(0)):
+                trace_mat = seq[i].cpu().numpy()
+                length = seq.size(1)
+                (rec_act, rec_res), t_rec = self.black_box.recommend(
+                    trace_mat, length, return_time=True
+                )
+                out.append(joint_action_idx(rec_act, rec_res))
+                self.last_rec_act, self.last_rec_res = rec_act, rec_res
+                self.last_t_rec = float(t_rec)
+                self._last_trace, self._last_len = trace_mat, length
+            return torch.tensor(out, dtype=torch.long)
+
+    @property
+    def last_t_orig(self) -> Optional[float]:
+        if self._last_trace is None:
+            return None
+        return self.black_box.predict_time_for_pair(
+            self._last_trace, self._last_len, self.orig_act, self.orig_res
+        )
+
+    @property
+    def last_margin(self) -> Optional[float]:
+        t_orig = self.last_t_orig
+        return None if (t_orig is None or self.last_t_rec is None) else t_orig - self.last_t_rec
+
+    @property
+    def last_orig_is_candidate(self) -> Optional[bool]:
+        if self._last_trace is None:
+            return None
+        return (self.orig_act, self.orig_res) in self.black_box.candidate_pairs(
+            self._last_trace, self._last_len
+        )
+
+
 def feature_names() -> List[str]:
     return event_log.feature_names()
 
 def decode_explanation(
-    z_orig: torch.Tensor,              # (1, latent_dim)
-    z_cf:   torch.Tensor,              # (1, latent_dim)
+    z_orig: torch.Tensor,
+    z_cf:   torch.Tensor,
     raw_sequence_matrix: np.ndarray,
     original_action: Tuple[str, str],
     cf_action:       Tuple[str, str],
@@ -514,16 +520,9 @@ def decode_explanation(
     step: int = 0,
     eps: float = 0.05,
 ) -> Dict:
-    """
-    Translates the latent counterfactual into a structured, human-readable explanation.
 
-    Returns a dict with:
-      - summary_text: plain English narrative
-      - changed_features: list of (feature_name, orig_val, cf_val)
-    """
-    
     with torch.no_grad():
-        seq_orig = decode_fn(z_orig).squeeze(0)   # (T, event_dim) or (event_dim,)
+        seq_orig = decode_fn(z_orig).squeeze(0)
         seq_cf   = decode_fn(z_cf).squeeze(0)
 
     changed_events = []
@@ -534,20 +533,18 @@ def decode_explanation(
     scalar_start = n_act + n_res
 
     if seq_orig.dim() == 2:
-        seq_vals_orig = raw_sequence_matrix 
+        seq_vals_orig = raw_sequence_matrix
         seq_vals_cf = decode_fn(z_cf).squeeze(0).detach().cpu().numpy()
 
         for t in range(seq_vals_orig.shape[0]):
-            # 1. EVALUATE CATEGORICALS VIA ARGMAX (True Process Transitions)
             o_act = int(np.argmax(seq_vals_orig[t, :n_act]))
             c_act = int(np.argmax(seq_vals_cf[t, :n_act]))
-            
+
             o_res = int(np.argmax(seq_vals_orig[t, n_act:scalar_start])) if n_res > 0 else 0
             c_res = int(np.argmax(seq_vals_cf[t, n_act:scalar_start])) if n_res > 0 else 0
-            
-            # Only record an event change if the actual categorical label flipped!
+
             if o_act != c_act or o_res != c_res:
-                changed_events.append({                                                                         
+                changed_events.append({
                     "t": t + 1,
                     "activity_from": event_log.IDX2ACT.get(o_act, "?"),
                     "activity_to": event_log.IDX2ACT.get(c_act, "?"),
@@ -555,7 +552,6 @@ def decode_explanation(
                     "resource_to": event_log.IDX2RES.get(c_res, "?"),
                 })
 
-        # 2. EVALUATE CONTINUOUS NUMERICAL SCALARS VIA EPSILON (0.05)
         feature_list = feature_names()
         n_total = seq_vals_orig.shape[1]
 
@@ -563,17 +559,17 @@ def decode_explanation(
             {"AMOUNT_REQ", "RequestedAmount"},
             {"Leucocytes"},
             {"CRP"},
-            {"LacticAcid"}, {"case:SUMleges"},
+            {"LacticAcid"}, {"case:SUMleges", "SUMleges"},
         ]
         free_categorical_group_names = ["LoanGoal", "ApplicationType", "CLOSURE_TYPE", "CLOSURE_REASON"]
         free_categorical_columns = set()
         for _grp_name in free_categorical_group_names:
             free_categorical_columns |= set(event_log.categorical_block_columns(_grp_name))
- 
+
         free_feature_names = set().union(*free_feature_alias_groups) \
             | free_categorical_columns \
             | set(event_log.ACTIVITIES) | set(event_log.RESOURCES)
-        
+
         seen_features = set()
         derived_features = []
 
@@ -582,25 +578,25 @@ def decode_explanation(
             _col_names = event_log.categorical_block_columns(_grp_name)
             _idx = [feature_list.index(n) for n in _col_names if n in feature_list]
             if not _idx:
-                continue  # this dataset doesn't have this categorical group
+                continue
 
 
             o_local = int(np.argmax(seq_vals_orig[T_last, _idx]))
             c_local = int(np.argmax(seq_vals_cf[T_last, _idx]))
             if o_local == c_local:
-                continue  # no change in this group
- 
+                continue
+
             idx2val = {i: v for v, i in event_log.CAT_VOCABULARIES.get(_grp_name, {}).items()}
             orig_val_str = idx2val.get(o_local, "?")
             cf_val_str = idx2val.get(c_local, "?")
- 
+
             changed_features.append({
                 "feature": _grp_name,
                 "original": orig_val_str,
                 "counterfactual": cf_val_str,
                 "delta": f"{orig_val_str} -> {cf_val_str}",
             })
-            seen_features.update(_col_names)  
+            seen_features.update(_col_names)
 
 
         for t in range(1, seq_vals_orig.shape[0]):
@@ -611,7 +607,8 @@ def decode_explanation(
 
                 fname = feature_list[i] if i < len(feature_list) else f"feat_{i}"
                 if fname in free_categorical_columns:
-                    continue  
+                    continue
+
                 if fname in seen_features:
                     continue
                 if t != seq_vals_orig.shape[0] - 1:
@@ -621,7 +618,7 @@ def decode_explanation(
                 is_derived = event_log.is_derived_feature(fname)
 
                 if not is_free and delta_val <= 0.05:
-                    continue  # Skip frozen feature
+                    continue
 
                 seen_features.add(fname)
 
@@ -632,7 +629,7 @@ def decode_explanation(
                 if not is_free and not is_derived and abs(real_delta) < 1e-6:
                     continue
 
-                entry = {                                          
+                entry = {
                     "feature": f"{fname}",
                     "original": f"{real_orig:.2f}",
                     "counterfactual": f"{real_cf:.2f}",
@@ -649,9 +646,6 @@ def decode_explanation(
     cf_act,   cf_res   = cf_action
 
 
-    # ── Plain English narrative ──────────────────────────────────────────────
-
-    # Create human-readable texts
     cf_feature_text = "".join(
         f"{c['feature']} would change from {c['original']} to {c['counterfactual']}\n"
         for c in changed_features
@@ -666,20 +660,17 @@ def decode_explanation(
         f"feature {c['feature']} had been {c['counterfactual']} instead of {c['original']}"
         for c in changed_features
     ]
-    
-    # Format sequence path variations cleanly: "t2 (A_SUBMITTED → A_PREACCEPTED)"
+
     event_strings = [
         f"at step {e['t']} the path had mutated to {e['activity_to']} and {e['resource_to']} instead of {e['activity_from']} and {e['resource_from']}"
         for e in changed_events
     ]
 
-    # Prefer concise per-event change text in the counterfactual sentence when available
     if event_change_text:
         cf_short = event_change_text
     else:
         cf_short = cf_feature_text
 
-    # Attribute changes
     if changed_features:
         attr_change_text = "; ".join(
             f"{c['feature']} from {c['original']} to {c['counterfactual']}"
@@ -702,26 +693,22 @@ def decode_explanation(
     else:
         cause_desc = f"a re-sequencing of past workflow steps: {events_phrase}"
 
-    # If BOTH activity and resource changed
     if orig_act != cf_act and orig_res != cf_res:
         dynamic_narrative = (
-            f"The model would completely change its next-step recommendation from {original_action} to {cf_action}," 
+            f"The model would completely change its next-step recommendation from {original_action} to {cf_action},"
             f"if there is {cause_desc}"
         )
 
-    # If ONLY activity or resource changed
-    # RESOURCE CHANGE ONLY (Activity Invariant)
     elif orig_act == cf_act and orig_res != cf_res:
         dynamic_narrative = (
-            f"The model would maintain its recommendation for the task {orig_act}, but would change the resource assignment from {orig_res} to {cf_res}," 
+            f"The model would maintain its recommendation for the task {orig_act}, but would change the resource assignment from {orig_res} to {cf_res},"
             f"if there is {cause_desc}"
         )
 
-    # ACTIVITY CHANGE ONLY (Resource Invariant)
     elif orig_res == cf_res and orig_act != cf_act:
         dynamic_narrative = (
             f"While {orig_res} was retained as the optimal actor, the model would change the activity from {orig_act} to {cf_act}, "
-            f"if there is {cause_desc}" 
+            f"if there is {cause_desc}"
         )
 
     elif orig_act == cf_act and orig_res == cf_res:
@@ -729,8 +716,7 @@ def decode_explanation(
             f"Optimization was unable to find a viable path to flip the model's recommendation. "
             f"The original recommendation {original_action} remains unchanged under all tested perturbations."
         )
-    
-    # Predicted KPI (execution time)
+
     kpi_text = ""
     if v_orig is not None and v_cf is not None:
         kpi_delta = v_cf - v_orig
@@ -751,14 +737,13 @@ def decode_explanation(
             )
             prospective_kpi_text = ("Following the recommendation pair could WORSEN the predicted execution time by {:.2f} hours compared to the counterfactual recommendation!!".format(kpi_delta))
 
-    
 
     summary_text = (
         f"Original Black-Box Recommendation:  ({orig_act}, {orig_res})\n"
         f"Counterfactual Recommendation:     ({cf_act}, {cf_res})\n\n"
         f"{kpi_text}"
         f"EXPLANATION:\n"
-        f"{dynamic_narrative}\n"  
+        f"{dynamic_narrative}\n"
         f"{prospective_kpi_text}\n\n"
         f"DETAILED PAST CHANGES:\n"
         f"Changed Events:\n"
@@ -776,7 +761,7 @@ def decode_explanation(
         )
     )
 
-   
+
     return {
         "summary_text":      summary_text,
         "changed_features":  changed_features,

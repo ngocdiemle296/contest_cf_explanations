@@ -1,0 +1,6 @@
+template,a,b
+co_existence,ER Registration,ER Sepsis Triage
+co_existence,ER Registration,ER Triage
+co_existence,ER Sepsis Triage,ER Triage
+exactly,ER Registration,
+exactly,ER Sepsis Triage,

@@ -11,7 +11,6 @@ RESOURCE_MATRIX_FILENAME = "resource_activity_matrix.npy"
 
 
 def save_domain(weights_dir: str, dataset_name: str = None) -> None:
-
     p = Path(weights_dir)
     p.mkdir(parents=True, exist_ok=True)
 
@@ -43,7 +42,6 @@ def save_domain(weights_dir: str, dataset_name: str = None) -> None:
 
 
 def load_domain(weights_dir: str, expected_dataset: str = None) -> None:
-   
     p = Path(weights_dir)
     domain_path = p / DOMAIN_FILENAME
     if not domain_path.exists():
