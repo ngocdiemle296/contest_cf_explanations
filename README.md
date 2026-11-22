@@ -1,6 +1,6 @@
 # CONTEST
 This repository contains the official implementation of the paper:
-> **Conformance-Aware Counterfactual Explanations for Prescriptive Process Analytics**  
+> **CONTEST: Conformance-Aware Counterfactual Explanations for Prescriptive Process Analytics**  
 > *Ngoc-Diem Le, Alessandro Padella, Massimiliano de Leoni*  
 > [[Paper (PDF) - (coming soon)]] 
 
@@ -8,7 +8,7 @@ This repository contains the official implementation of the paper:
 Prescriptive process analytics aims to provide actionable recommendations for process instances predicted to lead to unsatisfactory outcomes. However, many existing systems operate as black boxes: they do not explain why a recommendation was made, making it difficult for stakeholders to understand or contest its rationale. Several methods exist for explaining process predictions, but none explains recommendations about both the next activity and the prescribed resource. In this paper, this gap is tackled by introducing a counterfactual-based framework that explains by constructing a nearby alternative history that would lead to a different recommendation. Standard counterfactual generation methods typically assume static, fixed-length feature vectors and cannot capture the sequential, temporally dependent structure of process traces. Our approach addresses this issue by generating counterfactuals in a conformance-aware latent space, shaped by a differentiable structural regularizer that aligns generated traces with observed ones. The feasibility of candidate explanations is then validated by querying the black-box model and by an activity–resource compatibility check. An empirical evaluation on five settings drawn from four real-life event logs, using mined Declare constraints as a plausibility measure, shows that our framework is significantly more plausible than the closest baseline, which enforces these constraints during training and search, on two settings with no significant difference on the other three. It also finds a valid counterfactual more often on four of the five settings, without requiring any set of pre-defined constraints.
 
 ## Framework
-<img width="5135" height="2928" alt="framework (1)" src="https://github.com/user-attachments/assets/92272dea-1d10-4a8b-a4fa-ce87f786ba8a" />
+<img width="5083" height="2896" alt="framework" src="https://github.com/user-attachments/assets/d927d16e-2b4c-4caf-92f9-6d0bc704395b" />
 
 ## Web Interface
 
@@ -51,7 +51,7 @@ To explain other units, change the log in the paths (`bpi12`, `bpi15_5`, `bpi17_
 
 ## Demo notebook
 
-`demo.ipynb` goes through the same steps for both methods and shows the outputs. It also explains the output files, the Declare plausibility check, the constraints, the other options and the settings used in the paper.
+`demo.ipynb` goes through the same steps for both methods and shows the outputs. 
 
 Open it with the Python of the virtual environment from step 2, so that it uses the packages of `requirements.txt`. With the environment active:
 ```bash
