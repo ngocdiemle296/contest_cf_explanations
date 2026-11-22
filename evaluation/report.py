@@ -54,6 +54,31 @@ def cf_recommendation(summary_text):
     return m.group(1).strip(), m.group(2).strip()
 
 
+SENTINELS = {"START", "END"}
+COUNT_RULES = {"exactly": "exactly once", "exactly2": "exactly twice", "existence3": "at least three times"}
+
+
+def reason(v, present, counts):
+    t, a, b = v["template"], v["a"], v["b"]
+    if t == "absence":
+        return f"{a} should not occur, but it does"
+    if t in COUNT_RULES:
+        n = counts.get(a, 0)
+        if n == 0:
+            return f"{a} should occur {COUNT_RULES[t]}, but it is missing"
+        return f"{a} should occur {COUNT_RULES[t]}, but it occurs {n} time{'s' if n != 1 else ''}"
+    if t == "init":
+        return f"the history should start with {a}"
+    if t == "last":
+        return f"the history should end with {a}"
+    miss = [x for x in (a, b) if x not in present]
+    if len(miss) == 2:
+        return f"needs both {a} and {b}, both are missing"
+    if miss:
+        return f"needs both {a} and {b}, {miss[0]} is missing"
+    return f"{a} and {b} are both present, but not in the required order"
+
+
 def steps_text(steps):
     steps = [str(s) for s in steps]
     if len(steps) == 1:
@@ -170,11 +195,31 @@ def report_cf(unit, cf, prefix, constraints_dir):
                       f"({v_tdc} of {n_tdc} TDC, {v_ldc} of {n_ldc} LDC): not plausible.")
                 detail = sorted(check.get("violated_detail", []),
                                 key=lambda v: (v["source"] != "tdc", v["template"], str(v["a"]), str(v["b"])))
+                acts = [a for a, _ in trace if a not in SENTINELS]
+                seen = {"tdc": set(acts), "ldc": set(acts[:-1])}
+                counts = {"tdc": {}, "ldc": {}}
+                for a in acts:
+                    counts["tdc"][a] = counts["tdc"].get(a, 0) + 1
+                for a in acts[:-1]:
+                    counts["ldc"][a] = counts["ldc"].get(a, 0) + 1
+                missing = {}
+                for v in detail:
+                    for a in {v["a"], v["b"]}:
+                        if a not in seen[v["source"]] and v["template"] != "absence":
+                            missing[a] = missing.get(a, 0) + 1
+                if missing:
+                    print("    Activities these rules expect in the history, but that are not in it:")
+                    for a, n in sorted(missing.items(), key=lambda x: -x[1]):
+                        print(f"      {a}  (in {n} of the broken rules)")
+                print(f"    Broken rules{' (first ' + str(MAX_LISTED) + ')' if len(detail) > MAX_LISTED else ''}:")
                 for v in detail[:MAX_LISTED]:
                     b = "" if v["a"] == v["b"] else f", {v['b']}"
-                    print(f"      {v['source'].upper()} {v['template']}({v['a']}{b})")
+                    why = reason(v, seen[v["source"]], counts[v["source"]])
+                    print(f"      {v['source'].upper()} {v['template']}({v['a']}{b}): {why}")
                 if len(detail) > MAX_LISTED:
                     print(f"      ... and {len(detail) - MAX_LISTED} more")
+                print("    TDC rules hold in every training trace. LDC rules hold in every training history "
+                      f"followed by {cf_rec[0]}.")
 
 
 def find_unit(output_dir, case_id, milestone):
