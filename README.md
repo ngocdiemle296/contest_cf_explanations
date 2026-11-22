@@ -51,7 +51,7 @@ To explain other units, change the log in the paths (`bpi12`, `bpi15_5`, `bpi17_
 
 ## Demo notebook
 
-`demo.ipynb` goes through the same steps for both methods and shows the outputs. It also explains the output files, the Declare plausibility check, the constraints, the other options and the settings used in the paper.
+`demo.ipynb` goes through the same steps for both methods and shows the outputs. 
 
 Open it with the Python of the virtual environment from step 2, so that it uses the packages of `requirements.txt`. With the environment active:
 ```bash
