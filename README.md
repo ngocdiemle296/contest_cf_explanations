@@ -1,6 +1,6 @@
 # CONTEST
 This repository contains the official implementation of the paper:
-> **Conformance-Aware Counterfactual Explanations for Prescriptive Process Analytics**  
+> **CONTEST: Conformance-Aware Counterfactual Explanations for Prescriptive Process Analytics**  
 > *Ngoc-Diem Le, Alessandro Padella, Massimiliano de Leoni*  
 > [[Paper (PDF) - (coming soon)]] 
 
