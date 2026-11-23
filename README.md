@@ -63,7 +63,7 @@ In Jupyter, choose the kernel **Python (CONTEST)** (**Kernel → Change kernel**
 
 ## Stochasticity
 
-The counterfactual search is stochastic. Both methods fit their local surrogate on a randomly sampled neighbourhood of the encoded prefix and start the latent-space search from a small random perturbation of it. Running the same unit twice can therefore give different counterfactuals, a different number of them, or none, and they can differ from those reported in the paper and shown on the web interface. Over a whole test log the rates change only slightly between runs, but individual units can switch between finding and not finding a counterfactual.
+The counterfactual search is stochastic. Both methods fit their local surrogate on a randomly sampled neighbourhood of the encoded prefix and start the search from a small random perturbation of it on the latent space. Since a recommendation can usually be explained by more than one nearby history, a new run of the same unit may return other valid counterfactuals than those reported in the paper and shown on the web interface, and occasionally none. Over a whole test log the overall rates stay close between runs.
 
 ## License
 This project is licensed under the MIT License.
