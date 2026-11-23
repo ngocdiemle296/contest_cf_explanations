@@ -208,9 +208,14 @@ def report_cf(unit, cf, prefix, constraints_dir):
                         if a not in seen[v["source"]] and v["template"] != "absence":
                             missing[a] = missing.get(a, 0) + 1
                 if missing:
-                    print("    Activities these rules expect in the history, but that are not in it:")
+                    # These activities come from the LDC of the recommended activity: in every
+                    # training history followed by it, they occur earlier (TDC rules are only
+                    # checked when their activities are present, so they never add to this list).
+                    share = "Most" if v_ldc > v_tdc else "Some"
+                    print(f"    {share} broken rules come from the recommended activity {cf_rec[0]}. In the training log, "
+                          f"{cf_rec[0]} only follows histories that contain the activities below, and this history does not.")
                     for a, n in sorted(missing.items(), key=lambda x: -x[1]):
-                        print(f"      {a}  (in {n} of the broken rules)")
+                        print(f"      {a}, in {n} of the broken rules")
                 print(f"    Broken rules{' (first ' + str(MAX_LISTED) + ')' if len(detail) > MAX_LISTED else ''}:")
                 for v in detail[:MAX_LISTED]:
                     b = "" if v["a"] == v["b"] else f", {v['b']}"
